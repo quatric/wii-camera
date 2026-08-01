@@ -78,3 +78,17 @@ and `CAPTURE_FPS` in `source/main.c` changes the requested mode.
 - Disconnect handling and broader webcam mode fallback need hardware testing.
 
 Implementation details are in [PORTING.md](PORTING.md).
+
+## Contact
+
+General questions or comments can be sent to
+[quatricsoftware@gmail.com](mailto:quatricsoftware@gmail.com). No support will be provided
+for this tool.
+
+## License
+
+WiiCam-specific source code uses the MIT license. See [LICENSE](LICENSE).
+Vendored libuvc source remains under its BSD 3-Clause license; see
+[`vendor/libuvc-wii/LICENSE.txt`](vendor/libuvc-wii/LICENSE.txt).
+
+Copyright (c) 2026 quatric
