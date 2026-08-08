@@ -110,6 +110,8 @@ static bool ehci_control_transfer(unsigned int device_address,
     memset(setup, 0, 32);
     memset(data, 0, length > 32u ? length : 32u);
     memcpy(setup, request, 8);
+    if (length > 0 && !direction_in && result != NULL)
+        memcpy(data, result, length);
 
     ehci_qtd_initialize(&qtd[0], &qtd[1], 2, 8, false, setup);
     if (length > 0) {
@@ -198,6 +200,11 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
     unsigned char get_full_config[8] =
         {0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00};
     unsigned int streaming_interface = 0xffu;
+    unsigned int mjpeg_format = 0;
+    unsigned int mjpeg_frame = 0;
+    uint32_t frame_interval = 333333u;
+    bool in_streaming_interface = false;
+    unsigned int current_mjpeg_format = 0;
     unsigned int offset;
 
     *stage = 1;
@@ -233,17 +240,37 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
                                direct_configuration, final_token,
                                live_status, live_command, trace))
         return false;
-    for (offset = 0; offset + 9u <= *configuration_length;) {
+    for (offset = 0; offset + 2u <= *configuration_length;) {
         const unsigned char *item = direct_configuration + offset;
         if (item[0] < 2u || offset + item[0] > *configuration_length) break;
-        if (item[1] == 4 && item[0] >= 9u && item[3] == 0 &&
-            item[5] == 14 && item[6] == 2) {
-            streaming_interface = item[2];
-            break;
+        if (item[1] == 4 && item[0] >= 9u) {
+            in_streaming_interface = item[3] == 0 && item[5] == 14 &&
+                                     item[6] == 2;
+            current_mjpeg_format = 0;
+            if (in_streaming_interface && streaming_interface == 0xffu)
+                streaming_interface = item[2];
+        } else if (in_streaming_interface && item[1] == 0x24u &&
+                   item[0] >= 4u && item[2] == 0x06u) {
+            current_mjpeg_format = item[3];
+        } else if (in_streaming_interface && current_mjpeg_format != 0 &&
+                   item[1] == 0x24u && item[0] >= 26u && item[2] == 0x07u) {
+            unsigned int width = (unsigned int)item[5] |
+                                 ((unsigned int)item[6] << 8);
+            unsigned int height = (unsigned int)item[7] |
+                                  ((unsigned int)item[8] << 8);
+            if (width == CAPTURE_WIDTH && height == CAPTURE_HEIGHT &&
+                mjpeg_frame == 0) {
+                mjpeg_format = current_mjpeg_format;
+                mjpeg_frame = item[3];
+                frame_interval = (uint32_t)item[21] |
+                    ((uint32_t)item[22] << 8) | ((uint32_t)item[23] << 16) |
+                    ((uint32_t)item[24] << 24);
+            }
         }
         offset += item[0];
     }
-    if (streaming_interface == 0xffu) return false;
+    if (streaming_interface == 0xffu || mjpeg_format == 0 || mjpeg_frame == 0)
+        return false;
     {
         unsigned char set_configuration[8] =
             {0x00, 0x09, config_header[5], 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -254,11 +281,35 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
             return false;
     }
     {
+        unsigned char set_probe[8] =
+            {0x21, 0x01, 0x00, 0x01, (unsigned char)streaming_interface,
+             0x00, 26, 0x00};
         unsigned char get_probe[8] =
             {0xa1, 0x81, 0x00, 0x01, (unsigned char)streaming_interface,
              0x00, 26, 0x00};
+        unsigned char set_commit[8] =
+            {0x21, 0x01, 0x00, 0x02, (unsigned char)streaming_interface,
+             0x00, 26, 0x00};
+        memset(direct_probe_control, 0, sizeof(direct_probe_control));
+        direct_probe_control[0] = 1;
+        direct_probe_control[2] = (unsigned char)mjpeg_format;
+        direct_probe_control[3] = (unsigned char)mjpeg_frame;
+        direct_probe_control[4] = (unsigned char)frame_interval;
+        direct_probe_control[5] = (unsigned char)(frame_interval >> 8);
+        direct_probe_control[6] = (unsigned char)(frame_interval >> 16);
+        direct_probe_control[7] = (unsigned char)(frame_interval >> 24);
         *stage = 7;
+        if (!ehci_control_transfer(*active_address, set_probe, 26, false,
+                                   direct_probe_control, final_token,
+                                   live_status, live_command, trace))
+            return false;
+        *stage = 8;
         if (!ehci_control_transfer(*active_address, get_probe, 26, true,
+                                   direct_probe_control, final_token,
+                                   live_status, live_command, trace))
+            return false;
+        *stage = 9;
+        if (!ehci_control_transfer(*active_address, set_commit, 26, false,
                                    direct_probe_control, final_token,
                                    live_status, live_command, trace))
             return false;
@@ -506,7 +557,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.22\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.23\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
