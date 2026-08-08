@@ -693,7 +693,7 @@ static void run_ehci_takeover_probe(void) {
         printf("Capturing 640x480 MJPEG...\n");
         /* Let exposure and white balance settle; initial C920 frames can be
          * valid JPEGs containing an entirely black sensor image. */
-        usleep(1500000);
+        usleep(5000000);
         ehci_receive_frame_test(active_address);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
@@ -817,7 +817,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.36\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.37\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
     run_ehci_takeover_probe();
