@@ -525,6 +525,7 @@ static void ehci_receive_frame_test(unsigned int device_address) {
     size_t frame_size = 0;
     bool collecting = false, complete = false;
     unsigned int frame_id = 0;
+    uint32_t frame_pts = 0;
 
     for (i = 0; i < 1024; ++i) frame_list[i] = ehci_dma_word(1u);
     memset(itds, 0, sizeof(*itds) * ISO_FRAMES);
@@ -573,7 +574,12 @@ static void ehci_receive_frame_test(unsigned int device_address) {
             ++packets;
             header = packet[0];
             if (header < 2u || header > length || (packet[1] & 0x40u)) continue;
-            if (collecting && (packet[1] & 1u) != frame_id) {
+            {
+                uint32_t packet_pts = header >= 6u && (packet[1] & 0x04u) ?
+                    ((uint32_t)packet[2] | ((uint32_t)packet[3] << 8) |
+                     ((uint32_t)packet[4] << 16) | ((uint32_t)packet[5] << 24)) : 0;
+            if (collecting && ((packet[1] & 1u) != frame_id ||
+                (frame_pts != 0 && packet_pts != 0 && packet_pts != frame_pts))) {
                 collecting = false;
                 frame_size = 0;
             }
@@ -581,6 +587,7 @@ static void ehci_receive_frame_test(unsigned int device_address) {
                 packet[header + 1] == 0xd8u) {
                 collecting = true;
                 frame_id = packet[1] & 1u;
+                frame_pts = packet_pts;
                 frame_size = 0;
             }
             if (collecting && frame_size + length - header <= sizeof(direct_mjpeg_frame)) {
@@ -588,6 +595,7 @@ static void ehci_receive_frame_test(unsigned int device_address) {
                 frame_size += length - header;
                 if ((packet[1] & 2u) && (packet[1] & 1u) == frame_id)
                     complete = true;
+            }
             }
         }
     }
@@ -809,7 +817,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.34\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.35\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
     run_ehci_takeover_probe();
@@ -830,8 +838,8 @@ int main(void) {
         printf("JPEG not saved size:%lu baseline:%u\n",
                (unsigned long)direct_mjpeg_size, direct_mjpeg_baseline);
     }
-    printf("\nHOME/B: Exit\n");
-    wait_for_exit_button();
+    printf("\nReturning to loader in 5 seconds...\n");
+    sleep(5);
     goto cleanup;
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
 
