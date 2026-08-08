@@ -24,6 +24,8 @@ static unsigned int direct_stream_alternate;
 static unsigned int direct_stream_endpoint;
 static unsigned int direct_stream_packet;
 static unsigned char direct_mjpeg_frame[512 * 1024];
+static size_t direct_mjpeg_size;
+static bool direct_mjpeg_baseline;
 
 static uint32_t ehci_read(uint32_t address) {
     return *(volatile uint32_t *)address;
@@ -585,6 +587,25 @@ static void ehci_receive_frame_test(unsigned int device_address) {
     printf("MJPEG data:%02x %02x end:%02x %02x\n", direct_mjpeg_frame[0],
            direct_mjpeg_frame[1], frame_size > 1 ? direct_mjpeg_frame[frame_size-2] : 0,
            frame_size ? direct_mjpeg_frame[frame_size-1] : 0);
+    if (complete) {
+        size_t p;
+        for (p = frame_size; p >= 2; --p) {
+            if (direct_mjpeg_frame[p - 2] == 0xffu &&
+                direct_mjpeg_frame[p - 1] == 0xd9u) {
+                frame_size = p;
+                break;
+            }
+        }
+        direct_mjpeg_baseline = false;
+        for (p = 2; p + 1 < frame_size; ++p) {
+            if (direct_mjpeg_frame[p] == 0xffu &&
+                direct_mjpeg_frame[p + 1] == 0xc0u) {
+                direct_mjpeg_baseline = true;
+                break;
+            }
+        }
+        direct_mjpeg_size = frame_size;
+    }
 }
 
 static void print_ehci_probe(void) {
@@ -780,9 +801,28 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.30\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.31\n\n");
+    storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
+    if (!storage_ready) printf("Storage error: %s\n", error);
     print_ehci_probe();
     run_ehci_takeover_probe();
+    if (storage_ready && direct_mjpeg_size > 0 && direct_mjpeg_baseline &&
+        storage_next_filename(folder, path, sizeof(path))) {
+        FILE *photo = fopen(path, "wb");
+        if (photo != NULL &&
+            fwrite(direct_mjpeg_frame, 1, direct_mjpeg_size, photo) == direct_mjpeg_size &&
+            fclose(photo) == 0) {
+            photo = NULL;
+            printf("Saved baseline JPEG: %s (%lu bytes)\n", path,
+                   (unsigned long)direct_mjpeg_size);
+        } else {
+            if (photo != NULL) fclose(photo);
+            printf("JPEG save failed\n");
+        }
+    } else {
+        printf("JPEG not saved size:%lu baseline:%u\n",
+               (unsigned long)direct_mjpeg_size, direct_mjpeg_baseline);
+    }
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
     wait_for_exit_button();
     goto cleanup;
