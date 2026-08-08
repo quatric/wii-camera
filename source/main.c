@@ -79,13 +79,15 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
                                        uint32_t trace[5]) {
     /* Hollywood's EHCI can only DMA from its reserved MEM2 aperture. The
      * corresponding physical window is 0x133e0000-0x1345ffff. */
-    ehci_qh_t *qh = (ehci_qh_t *)0x933e0000u;
-    ehci_qtd_t *qtd = (ehci_qtd_t *)0x933e0040u;
-    unsigned char *setup = (unsigned char *)0x933e00a0u;
-    unsigned char *data = (unsigned char *)0x933e00c0u;
+    ehci_qh_t *head = (ehci_qh_t *)0x933e0000u;
+    ehci_qh_t *qh = (ehci_qh_t *)0x933e0040u;
+    ehci_qtd_t *qtd = (ehci_qtd_t *)0x933e0080u;
+    unsigned char *setup = (unsigned char *)0x933e00e0u;
+    unsigned char *data = (unsigned char *)0x933e0100u;
     unsigned int elapsed;
     bool completed = false;
 
+    memset(head, 0, 64);
     memset(qh, 0, 64);
     memset(setup, 0, 32);
     memset(data, 0, 32);
@@ -99,9 +101,15 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     ehci_qtd_initialize(&qtd[2], NULL, 0, 0, true, NULL);
     qtd[2].token = ehci_dma_word(0x80000000u | 0x8000u | (3u << 10) | 0x80u);
 
-    qh->horizontal = ehci_dma_word(ehci_physical(qh) | 2u);
-    qh->endpoint = ehci_dma_word((2u << 12) | (1u << 14) |
-                                 (1u << 15) | (64u << 16));
+    head->horizontal = ehci_dma_word(ehci_physical(qh) | 2u);
+    head->endpoint = ehci_dma_word(1u << 15);
+    head->overlay.next = ehci_dma_word(1u);
+    head->overlay.alternate = ehci_dma_word(1u);
+    head->overlay.token = ehci_dma_word(0x40u);
+
+    qh->horizontal = ehci_dma_word(ehci_physical(head) | 2u);
+    qh->endpoint = ehci_dma_word((4u << 28) | (2u << 12) | (1u << 14) |
+                                 (64u << 16));
     qh->capabilities = ehci_dma_word(1u << 30);
     qh->overlay.next = ehci_dma_word(ehci_physical(&qtd[0]));
     qh->overlay.alternate = ehci_dma_word(1u);
@@ -109,9 +117,10 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     DCFlushRange(setup, 32);
     DCFlushRange(data, 32);
     DCFlushRange(qtd, sizeof(ehci_qtd_t) * 3);
+    DCFlushRange(head, 64);
     DCFlushRange(qh, 64);
     ehci_write(0xcd040014u, 0x3fu);
-    ehci_write(0xcd040028u, ehci_physical(qh));
+    ehci_write(0xcd040028u, ehci_physical(head));
     ehci_write(0xcd040010u, 0x00080021u);
 
     for (elapsed = 0; elapsed < 500; ++elapsed) {
@@ -298,7 +307,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.11\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.12\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
