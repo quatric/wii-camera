@@ -428,7 +428,7 @@ static void summarize_uvc_configuration(unsigned int length) {
 static void ehci_receive_isochronous_test(unsigned int device_address) {
     const uint32_t command_register = 0xcd040010u;
     const uint32_t status_register = 0xcd040014u;
-    const uint32_t frame_index_register = 0xcd040020u;
+    const uint32_t frame_index_register = 0xcd04001cu;
     const uint32_t periodic_register = 0xcd040024u;
     ehci_itd_t *itd = (ehci_itd_t *)0x933e0200u;
     uint32_t *frame_list = (uint32_t *)0x933e1000u;
@@ -701,7 +701,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.27\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.28\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
