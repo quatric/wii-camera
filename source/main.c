@@ -106,7 +106,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.2\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.3\n\n");
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
 
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));

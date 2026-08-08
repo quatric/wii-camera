@@ -215,6 +215,26 @@ static unsigned int configuration_uvc_mask(const libusb_device *device) {
     return (control ? 1u : 0u) | (streaming ? 2u : 0u);
 }
 
+static void configuration_first_interface(const libusb_device *device,
+                                          unsigned int *number,
+                                          unsigned int *class_code,
+                                          unsigned int *subclass) {
+    size_t offset = 0;
+    *number = *class_code = *subclass = 0xffu;
+    while (offset + 2 <= device->configuration_length) {
+        const unsigned char *descriptor = device->configuration + offset;
+        if (descriptor[0] < 2 || offset + descriptor[0] > device->configuration_length)
+            break;
+        if (descriptor[1] == USB_DT_INTERFACE && descriptor[0] >= USB_DT_INTERFACE_SIZE) {
+            *number = descriptor[2];
+            *class_code = descriptor[5];
+            *subclass = descriptor[6];
+            return;
+        }
+        offset += descriptor[0];
+    }
+}
+
 int libusb_init(libusb_context **context) {
     libusb_context *created;
     if (context == NULL) return LIBUSB_ERROR_INVALID_PARAM;
@@ -244,6 +264,11 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     unsigned int descriptor_failures = 0;
     unsigned int incomplete_uvc = 0;
     unsigned int last_uvc_mask = 0;
+    unsigned int last_interface = 0xffu;
+    unsigned int last_class = 0xffu;
+    unsigned int last_subclass = 0xffu;
+    uint16_t last_vendor = 0;
+    uint16_t last_product = 0;
     int attempt;
     size_t i;
 
@@ -280,6 +305,8 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
         device->product_id = entries[i].pid;
         device->address = (uint8_t)(i + 1);
         device->device_id = entries[i].device_id;
+        last_vendor = device->vendor_id;
+        last_product = device->product_id;
         initialize_interface_ids(device);
         if (open_device(device, &fd) != LIBUSB_SUCCESS) {
             ++open_failures;
@@ -294,6 +321,8 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
             continue;
         }
         last_uvc_mask = configuration_uvc_mask(device);
+        configuration_first_interface(device, &last_interface, &last_class,
+                                      &last_subclass);
         if (last_uvc_mask == 0) {
             ++incomplete_uvc;
             USB_CloseDevice(&fd);
@@ -347,9 +376,9 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
                  last_uvc_mask);
     } else {
         snprintf(wii_usb_status, sizeof(wii_usb_status),
-                 "IOS USB: %u; open:%u desc:%u nonuvc:%u mask:%u",
-                 count, open_failures, descriptor_failures, incomplete_uvc,
-                 last_uvc_mask);
+                 "IOS:%u %04x:%04x if:%u cls:%u/%u open:%u desc:%u",
+                 count, last_vendor, last_product, last_interface, last_class,
+                 last_subclass, open_failures, descriptor_failures);
     }
     *list = devices;
     return (ssize_t)unique_count;
