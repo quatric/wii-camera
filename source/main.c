@@ -464,7 +464,9 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
         ((direct_stream_endpoint & 0x0fu) << 8) | (device_address & 0x7fu));
     itd->buffer[1] = ehci_dma_word(((data_physical + 0x1000u) & ~0xfffu) |
                                   0x800u | direct_stream_packet);
-    itd->buffer[2] = ehci_dma_word((data_physical + 0x2000u) & ~0xfffu);
+    /* iTD Mult is encoded literally (1-3); zero is reserved. This
+     * alternate uses one 944-byte transaction per microframe. */
+    itd->buffer[2] = ehci_dma_word(((data_physical + 0x2000u) & ~0xfffu) | 1u);
     DCFlushRange(data, direct_stream_packet * 8u);
     DCFlushRange(itd, sizeof(*itd));
     DCFlushRange(frame_list, 4096);
@@ -701,7 +703,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.28\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.29\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
