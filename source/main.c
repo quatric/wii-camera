@@ -76,7 +76,7 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
                                        uint32_t *final_token,
                                        uint32_t *live_status,
                                        uint32_t *live_command,
-                                       uint32_t trace[5]) {
+                                       uint32_t trace[9]) {
     /* Hollywood's EHCI can only DMA from its reserved MEM2 aperture. The
      * corresponding physical window is 0x133e0000-0x1345ffff. */
     ehci_qh_t *head = (ehci_qh_t *)0x933e0000u;
@@ -141,6 +141,11 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     trace[2] = __builtin_bswap32(qh->overlay.next);
     trace[3] = __builtin_bswap32(qh->overlay.token);
     trace[4] = __builtin_bswap32(qtd[0].token);
+    DCInvalidateRange(head, 64);
+    trace[5] = __builtin_bswap32(head->horizontal);
+    trace[6] = __builtin_bswap32(qh->horizontal);
+    trace[7] = __builtin_bswap32(qh->endpoint);
+    trace[8] = __builtin_bswap32(qh->capabilities);
     ehci_write(0xcd040010u, 0);
     ehci_wait_bits(0xcd040014u, 0x1000u, 0x1000u, 100);
     DCInvalidateRange(data, 32);
@@ -175,7 +180,7 @@ static void run_ehci_takeover_probe(void) {
     uint32_t transfer_token = 0xffffffffu;
     uint32_t transfer_status = 0xffffffffu;
     uint32_t transfer_command = 0xffffffffu;
-    uint32_t trace[5] = {0};
+    uint32_t trace[9] = {0};
     bool descriptor_ok;
 
     ehci_write(interrupt_register, 0);
@@ -215,6 +220,9 @@ static void run_ehci_takeover_probe(void) {
                (unsigned long)trace[0], (unsigned long)trace[1],
                (unsigned long)trace[2], (unsigned long)trace[3],
                (unsigned long)trace[4]);
+        printf("head:%08lx qlink:%08lx ep:%08lx cap:%08lx\n",
+               (unsigned long)trace[5], (unsigned long)trace[6],
+               (unsigned long)trace[7], (unsigned long)trace[8]);
     }
 }
 
@@ -307,7 +315,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.12\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.13\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
