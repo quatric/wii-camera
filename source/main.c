@@ -17,6 +17,7 @@
 #define JPEG_QUALITY   90
 
 static volatile bool exit_requested;
+static unsigned char direct_configuration[4096];
 
 static uint32_t ehci_read(uint32_t address) {
     return *(volatile uint32_t *)address;
@@ -101,10 +102,12 @@ static bool ehci_control_transfer(unsigned int device_address,
     unsigned int elapsed;
     bool completed = false;
 
+    if (length > 4096u) return false;
+
     memset(head, 0, sizeof(*head));
     memset(qh, 0, sizeof(*qh));
     memset(setup, 0, 32);
-    memset(data, 0, 32);
+    memset(data, 0, length > 32u ? length : 32u);
     memcpy(setup, request, 8);
 
     ehci_qtd_initialize(&qtd[0], &qtd[1], 2, 8, false, setup);
@@ -132,7 +135,7 @@ static bool ehci_control_transfer(unsigned int device_address,
     qh->overlay_alternate = ehci_dma_word(1u);
 
     DCFlushRange(setup, 32);
-    DCFlushRange(data, 32);
+    DCFlushRange(data, length > 32u ? length : 32u);
     DCFlushRange(qtd, sizeof(ehci_qtd_t) * 3);
     DCFlushRange(head, sizeof(*head));
     DCFlushRange(qh, sizeof(*qh));
@@ -168,7 +171,7 @@ static bool ehci_control_transfer(unsigned int device_address,
      * DMA structures are reused. */
     ehci_write(0xcd040010u, 0x00080001u);
     ehci_wait_bits(0xcd040014u, 0x8000u, 0, 100);
-    DCInvalidateRange(data, 32);
+    DCInvalidateRange(data, length > 32u ? length : 32u);
     if (completed && direction_in && result != NULL && length > 0)
         memcpy(result, data, length);
     return completed;
@@ -181,13 +184,16 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
                                   uint32_t *live_command,
                                   uint32_t trace[9],
                                   unsigned int *stage,
-                                  unsigned int *active_address) {
+                                  unsigned int *active_address,
+                                  unsigned int *configuration_length) {
     static const unsigned char get_device[8] =
         {0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00};
     static const unsigned char set_address[8] =
         {0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
     static const unsigned char get_config[8] =
         {0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 9, 0x00};
+    unsigned char get_full_config[8] =
+        {0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00};
 
     *stage = 1;
     if (!ehci_control_transfer(0, get_device, 18, true, descriptor,
@@ -202,14 +208,55 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
     if (ehci_control_transfer(1, get_config, 9, true, config_header,
                               final_token, live_status, live_command, trace)) {
         *active_address = 1;
-        return true;
+    } else {
+        *stage = 4;
+        if (!ehci_control_transfer(0, get_config, 9, true, config_header,
+                                   final_token, live_status, live_command, trace))
+            return false;
+        *active_address = 0;
     }
-    *stage = 4;
-    if (!ehci_control_transfer(0, get_config, 9, true, config_header,
-                               final_token, live_status, live_command, trace))
+    *configuration_length = (unsigned int)config_header[2] |
+                            ((unsigned int)config_header[3] << 8);
+    if (*configuration_length < 9u || *configuration_length >
+        sizeof(direct_configuration))
         return false;
-    *active_address = 0;
+    get_full_config[6] = (unsigned char)(*configuration_length & 0xffu);
+    get_full_config[7] = (unsigned char)(*configuration_length >> 8);
+    *stage = 5;
+    if (!ehci_control_transfer(*active_address, get_full_config,
+                               *configuration_length, true,
+                               direct_configuration, final_token,
+                               live_status, live_command, trace))
+        return false;
     return true;
+}
+
+static void summarize_uvc_configuration(unsigned int length) {
+    unsigned int offset = 0;
+    unsigned int video_control = 0;
+    unsigned int video_streaming = 0;
+    unsigned int streaming_alternates = 0;
+    unsigned int isochronous_endpoints = 0;
+    while (offset + 2u <= length) {
+        const unsigned char *descriptor = direct_configuration + offset;
+        unsigned int descriptor_length = descriptor[0];
+        if (descriptor_length < 2u || offset + descriptor_length > length)
+            break;
+        if (descriptor[1] == 4 && descriptor_length >= 9u) {
+            if (descriptor[5] == 14 && descriptor[6] == 1) ++video_control;
+            if (descriptor[5] == 14 && descriptor[6] == 2) {
+                ++video_streaming;
+                if (descriptor[3] != 0) ++streaming_alternates;
+            }
+        } else if (descriptor[1] == 5 && descriptor_length >= 7u &&
+                   (descriptor[3] & 3u) == 1u) {
+            ++isochronous_endpoints;
+        }
+        offset += descriptor_length;
+    }
+    printf("UVC full:%u VC:%u VS:%u alts:%u iso:%u\n", length,
+           video_control, video_streaming, streaming_alternates,
+           isochronous_endpoints);
 }
 
 static void print_ehci_probe(void) {
@@ -243,6 +290,7 @@ static void run_ehci_takeover_probe(void) {
     uint32_t trace[9] = {0};
     unsigned int enumeration_stage = 0;
     unsigned int active_address = 0xffu;
+    unsigned int configuration_length = 0;
     bool descriptor_ok;
 
     ehci_write(interrupt_register, 0);
@@ -274,16 +322,17 @@ static void run_ehci_takeover_probe(void) {
                                           &transfer_token, &transfer_status,
                                           &transfer_command, trace,
                                           &enumeration_stage,
-                                          &active_address);
+                                          &active_address,
+                                          &configuration_length);
     if (descriptor_ok) {
         printf("EHCI dev %02x%02x VID:%02x%02x PID:%02x%02x mps:%u\n",
                descriptor[0], descriptor[1], descriptor[9], descriptor[8],
                descriptor[11], descriptor[10], descriptor[7]);
         printf("EHCI addr:%u cfglen:%u interfaces:%u cfgval:%u\n",
                active_address,
-               (unsigned int)config_header[2] |
-                   ((unsigned int)config_header[3] << 8),
+               configuration_length,
                config_header[4], config_header[5]);
+        summarize_uvc_configuration(configuration_length);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
                enumeration_stage,
@@ -389,7 +438,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.18\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.19\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
