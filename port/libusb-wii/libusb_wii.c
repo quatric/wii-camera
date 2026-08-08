@@ -4,12 +4,15 @@
 #include <ogc/mutex.h>
 #include <ogc/usb.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #define WII_USB_MAX_DEVICES 32
 #define WII_USB_VIDEO_CLASS 14
+#define WII_USB_MAX_INTERFACES 32
+#define WII_USB_NO_DEVICE_ID INT32_MIN
 
 struct libusb_context {
     bool initialized;
@@ -20,8 +23,11 @@ struct libusb_device {
     uint16_t vendor_id;
     uint16_t product_id;
     uint8_t address;
-    usb_devdesc descriptors;
-    bool descriptors_ready;
+    int32_t device_id;
+    unsigned char device_descriptor[USB_DT_DEVICE_SIZE];
+    unsigned char *configuration;
+    uint16_t configuration_length;
+    int32_t interface_device_ids[WII_USB_MAX_INTERFACES];
 };
 
 struct libusb_device_handle {
@@ -41,6 +47,12 @@ typedef struct {
     struct libusb_transfer public_transfer;
 } wii_transfer_t;
 
+static char wii_usb_status[160] = "USB backend has not enumerated devices";
+
+const char *libusb_wii_last_error(void) {
+    return wii_usb_status;
+}
+
 static wii_transfer_t *private_transfer(struct libusb_transfer *transfer) {
     return (wii_transfer_t *)((unsigned char *)transfer -
                              offsetof(wii_transfer_t, public_transfer));
@@ -51,19 +63,151 @@ static int map_ios_error(int result) {
     return LIBUSB_ERROR_IO;
 }
 
-static int open_legacy_device(const libusb_device *device, int32_t *fd) {
-    int result = USB_OpenDevice(USB_OH0_DEVICE_ID, device->vendor_id,
+static uint16_t read_le16(const unsigned char *value) {
+    return (uint16_t)value[0] | ((uint16_t)value[1] << 8);
+}
+
+static int open_device(const libusb_device *device, int32_t *fd) {
+    int result = USB_OpenDevice(device->device_id, device->vendor_id,
                                 device->product_id, fd);
     return result < 0 ? LIBUSB_ERROR_NO_DEVICE : LIBUSB_SUCCESS;
 }
 
-static int read_descriptors(libusb_device *device, usb_devdesc *descriptors) {
-    int32_t fd = -1;
-    int result = open_legacy_device(device, &fd);
-    if (result != LIBUSB_SUCCESS) return result;
-    result = USB_GetDescriptors(fd, descriptors);
-    USB_CloseDevice(&fd);
-    return map_ios_error(result);
+static void initialize_interface_ids(libusb_device *device) {
+    int interface_number;
+    for (interface_number = 0; interface_number < WII_USB_MAX_INTERFACES;
+         ++interface_number)
+        device->interface_device_ids[interface_number] = WII_USB_NO_DEVICE_ID;
+}
+
+static void map_ios58_interfaces(libusb_device *device,
+                                 const usb_device_entry *entries,
+                                 uint8_t entry_count) {
+    uint8_t entry_index;
+    for (entry_index = 0; entry_index < entry_count; ++entry_index) {
+        usb_devdesc descriptor;
+        uint8_t configuration_index;
+        if (entries[entry_index].vid != device->vendor_id ||
+            entries[entry_index].pid != device->product_id)
+            continue;
+        if (USB_GetDescriptors(entries[entry_index].device_id, &descriptor) < 0)
+            continue;
+        for (configuration_index = 0;
+             configuration_index < descriptor.bNumConfigurations;
+             ++configuration_index) {
+            usb_configurationdesc *configuration =
+                &descriptor.configurations[configuration_index];
+            uint8_t interface_index;
+            for (interface_index = 0;
+                 interface_index < configuration->bNumInterfaces;
+                 ++interface_index) {
+                uint8_t number = configuration->interfaces[interface_index].bInterfaceNumber;
+                if (number < WII_USB_MAX_INTERFACES)
+                    device->interface_device_ids[number] = entries[entry_index].device_id;
+            }
+        }
+        USB_FreeDescriptors(&descriptor);
+    }
+}
+
+static int32_t device_id_for_interface(const libusb_device *device,
+                                       unsigned int interface_number) {
+    if (interface_number < WII_USB_MAX_INTERFACES &&
+        device->interface_device_ids[interface_number] != WII_USB_NO_DEVICE_ID)
+        return device->interface_device_ids[interface_number];
+    return device->device_id;
+}
+
+static int32_t device_id_for_endpoint(const libusb_device *device,
+                                      uint8_t endpoint_address) {
+    size_t offset = 0;
+    unsigned int interface_number = WII_USB_MAX_INTERFACES;
+    while (offset + 2 <= device->configuration_length) {
+        const unsigned char *descriptor = device->configuration + offset;
+        if (descriptor[0] < 2 || offset + descriptor[0] > device->configuration_length)
+            break;
+        if (descriptor[1] == USB_DT_INTERFACE && descriptor[0] >= USB_DT_INTERFACE_SIZE)
+            interface_number = descriptor[2];
+        else if (descriptor[1] == USB_DT_ENDPOINT &&
+                 descriptor[0] >= USB_DT_ENDPOINT_SIZE &&
+                 descriptor[2] == endpoint_address)
+            return device_id_for_interface(device, interface_number);
+        offset += descriptor[0];
+    }
+    return device->device_id;
+}
+
+static int read_raw_descriptors(int32_t fd, libusb_device *device) {
+    unsigned char *buffer = memalign(32, 32);
+    unsigned char *configuration = NULL;
+    uint16_t total_length;
+    int result;
+
+    if (buffer == NULL) return LIBUSB_ERROR_NO_MEM;
+    memset(buffer, 0, 32);
+    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
+                             USB_REQ_GETDESCRIPTOR, USB_DT_DEVICE << 8,
+                             0, USB_DT_DEVICE_SIZE, buffer);
+    if (result < 0 || buffer[0] < USB_DT_DEVICE_SIZE ||
+        buffer[1] != USB_DT_DEVICE) {
+        free(buffer);
+        return LIBUSB_ERROR_IO;
+    }
+    memcpy(device->device_descriptor, buffer, USB_DT_DEVICE_SIZE);
+
+    memset(buffer, 0, 32);
+    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
+                             USB_REQ_GETDESCRIPTOR, USB_DT_CONFIG << 8,
+                             0, USB_DT_CONFIG_SIZE, buffer);
+    if (result < 0 || buffer[0] < USB_DT_CONFIG_SIZE ||
+        buffer[1] != USB_DT_CONFIG) {
+        free(buffer);
+        return LIBUSB_ERROR_IO;
+    }
+    total_length = read_le16(buffer + 2);
+    free(buffer);
+    if (total_length < USB_DT_CONFIG_SIZE) return LIBUSB_ERROR_IO;
+
+    buffer = memalign(32, ((size_t)total_length + 31u) & ~31u);
+    configuration = malloc(total_length);
+    if (buffer == NULL || configuration == NULL) {
+        free(buffer);
+        free(configuration);
+        return LIBUSB_ERROR_NO_MEM;
+    }
+    memset(buffer, 0, total_length);
+    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
+                             USB_REQ_GETDESCRIPTOR, USB_DT_CONFIG << 8,
+                             0, total_length, buffer);
+    if (result < 0 || buffer[1] != USB_DT_CONFIG) {
+        free(buffer);
+        free(configuration);
+        return LIBUSB_ERROR_IO;
+    }
+    memcpy(configuration, buffer, total_length);
+    free(buffer);
+    device->configuration = configuration;
+    device->configuration_length = total_length;
+    return LIBUSB_SUCCESS;
+}
+
+static bool configuration_is_uvc(const libusb_device *device) {
+    size_t offset = 0;
+    bool control = false;
+    bool streaming = false;
+    while (offset + 2 <= device->configuration_length) {
+        const unsigned char *descriptor = device->configuration + offset;
+        if (descriptor[0] < 2 || offset + descriptor[0] > device->configuration_length)
+            break;
+        if (descriptor[1] == USB_DT_INTERFACE && descriptor[0] >= USB_DT_INTERFACE_SIZE) {
+            if (descriptor[5] == WII_USB_VIDEO_CLASS && descriptor[6] == 1)
+                control = true;
+            if (descriptor[5] == WII_USB_VIDEO_CLASS && descriptor[6] == 2)
+                streaming = true;
+        }
+        offset += descriptor[0];
+    }
+    return control && streaming;
 }
 
 int libusb_init(libusb_context **context) {
@@ -110,6 +254,7 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     for (i = 0; i < count; ++i) {
         size_t duplicate;
         libusb_device *device;
+        int32_t fd = -1;
         for (duplicate = 0; duplicate < unique_count; ++duplicate) {
             if (devices[duplicate]->vendor_id == entries[i].vid &&
                 devices[duplicate]->product_id == entries[i].pid)
@@ -125,14 +270,64 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
         device->vendor_id = entries[i].vid;
         device->product_id = entries[i].pid;
         device->address = (uint8_t)(i + 1);
-        if (read_descriptors(device, &device->descriptors) != LIBUSB_SUCCESS) {
+        device->device_id = entries[i].device_id;
+        initialize_interface_ids(device);
+        if (open_device(device, &fd) != LIBUSB_SUCCESS ||
+            read_raw_descriptors(fd, device) != LIBUSB_SUCCESS ||
+            !configuration_is_uvc(device)) {
+            if (fd >= 0) USB_CloseDevice(&fd);
+            free(device->configuration);
             free(device);
             continue;
         }
-        device->descriptors_ready = true;
+        USB_CloseDevice(&fd);
+        map_ios58_interfaces(device, entries, count);
         devices[unique_count++] = device;
     }
+    /* Older IOS/libogc combinations only enumerate VID/PID. Try the legacy
+     * OH0 path when IOS58's interface IDs did not yield a full UVC config. */
+    if (unique_count == 0) {
+        for (i = 0; i < count; ++i) {
+            libusb_device *device;
+            int32_t fd = -1;
+            size_t duplicate;
+            for (duplicate = 0; duplicate < i; ++duplicate) {
+                if (entries[duplicate].vid == entries[i].vid &&
+                    entries[duplicate].pid == entries[i].pid)
+                    break;
+            }
+            if (duplicate != i) continue;
+            device = calloc(1, sizeof(*device));
+            if (device == NULL) break;
+            device->references = 1;
+            device->vendor_id = entries[i].vid;
+            device->product_id = entries[i].pid;
+            device->address = (uint8_t)(i + 1);
+            device->device_id = USB_OH0_DEVICE_ID;
+            initialize_interface_ids(device);
+            if (open_device(device, &fd) == LIBUSB_SUCCESS &&
+                read_raw_descriptors(fd, device) == LIBUSB_SUCCESS &&
+                configuration_is_uvc(device)) {
+                USB_CloseDevice(&fd);
+                devices[unique_count++] = device;
+            } else {
+                if (fd >= 0) USB_CloseDevice(&fd);
+                free(device->configuration);
+                free(device);
+            }
+        }
+    }
     devices[unique_count] = NULL;
+    if (unique_count > 0) {
+        snprintf(wii_usb_status, sizeof(wii_usb_status),
+                 "IOS USB: %u entries, %u UVC device(s), %04x:%04x",
+                 count, (unsigned int)unique_count,
+                 devices[0]->vendor_id, devices[0]->product_id);
+    } else {
+        snprintf(wii_usb_status, sizeof(wii_usb_status),
+                 "IOS USB: %u entries, none exposed a complete UVC config",
+                 count);
+    }
     *list = devices;
     return (ssize_t)unique_count;
 }
@@ -153,32 +348,31 @@ libusb_device *libusb_ref_device(libusb_device *device) {
 
 void libusb_unref_device(libusb_device *device) {
     if (device != NULL && --device->references == 0) {
-        if (device->descriptors_ready) USB_FreeDescriptors(&device->descriptors);
+        free(device->configuration);
         free(device);
     }
 }
 
 int libusb_get_device_descriptor(libusb_device *device,
                                  struct libusb_device_descriptor *descriptor) {
-    const usb_devdesc *source;
+    const unsigned char *source;
     if (device == NULL || descriptor == NULL) return LIBUSB_ERROR_INVALID_PARAM;
-    if (!device->descriptors_ready) return LIBUSB_ERROR_NO_DEVICE;
-    source = &device->descriptors;
+    source = device->device_descriptor;
     memset(descriptor, 0, sizeof(*descriptor));
-    descriptor->bLength = source->bLength;
-    descriptor->bDescriptorType = source->bDescriptorType;
-    descriptor->bcdUSB = source->bcdUSB;
-    descriptor->bDeviceClass = source->bDeviceClass;
-    descriptor->bDeviceSubClass = source->bDeviceSubClass;
-    descriptor->bDeviceProtocol = source->bDeviceProtocol;
-    descriptor->bMaxPacketSize0 = source->bMaxPacketSize0;
-    descriptor->idVendor = source->idVendor;
-    descriptor->idProduct = source->idProduct;
-    descriptor->bcdDevice = source->bcdDevice;
-    descriptor->iManufacturer = source->iManufacturer;
-    descriptor->iProduct = source->iProduct;
-    descriptor->iSerialNumber = source->iSerialNumber;
-    descriptor->bNumConfigurations = source->bNumConfigurations;
+    descriptor->bLength = source[0];
+    descriptor->bDescriptorType = source[1];
+    descriptor->bcdUSB = read_le16(source + 2);
+    descriptor->bDeviceClass = source[4];
+    descriptor->bDeviceSubClass = source[5];
+    descriptor->bDeviceProtocol = source[6];
+    descriptor->bMaxPacketSize0 = source[7];
+    descriptor->idVendor = read_le16(source + 8);
+    descriptor->idProduct = read_le16(source + 10);
+    descriptor->bcdDevice = read_le16(source + 12);
+    descriptor->iManufacturer = source[14];
+    descriptor->iProduct = source[15];
+    descriptor->iSerialNumber = source[16];
+    descriptor->bNumConfigurations = source[17];
     return LIBUSB_SUCCESS;
 }
 
@@ -186,8 +380,10 @@ static void free_interface_descriptor(struct libusb_interface_descriptor *interf
     uint8_t endpoint;
     struct libusb_endpoint_descriptor *endpoints =
         (struct libusb_endpoint_descriptor *)interface->endpoint;
-    for (endpoint = 0; endpoint < interface->bNumEndpoints; ++endpoint)
-        free((void *)endpoints[endpoint].extra);
+    if (endpoints != NULL) {
+        for (endpoint = 0; endpoint < interface->bNumEndpoints; ++endpoint)
+            free((void *)endpoints[endpoint].extra);
+    }
     free(endpoints);
     free((void *)interface->extra);
 }
@@ -212,65 +408,26 @@ void libusb_free_config_descriptor(struct libusb_config_descriptor *config) {
     free(config);
 }
 
-static bool copy_interface_descriptor(struct libusb_interface_descriptor *destination,
-                                      const usb_interfacedesc *source) {
-    uint8_t endpoint;
-    struct libusb_endpoint_descriptor *endpoints = NULL;
-    memset(destination, 0, sizeof(*destination));
-    destination->bLength = source->bLength;
-    destination->bDescriptorType = source->bDescriptorType;
-    destination->bInterfaceNumber = source->bInterfaceNumber;
-    destination->bAlternateSetting = source->bAlternateSetting;
-    destination->bNumEndpoints = source->bNumEndpoints;
-    destination->bInterfaceClass = source->bInterfaceClass;
-    destination->bInterfaceSubClass = source->bInterfaceSubClass;
-    destination->bInterfaceProtocol = source->bInterfaceProtocol;
-    destination->iInterface = source->iInterface;
-    if (source->extra_size > 0) {
-        unsigned char *extra = malloc(source->extra_size);
-        if (extra == NULL) return false;
-        memcpy(extra, source->extra, source->extra_size);
-        destination->extra = extra;
-        destination->extra_length = source->extra_size;
-    }
-    if (source->bNumEndpoints > 0) {
-        endpoints = calloc(source->bNumEndpoints, sizeof(*endpoints));
-        if (endpoints == NULL) {
-            free((void *)destination->extra);
-            destination->extra = NULL;
-            return false;
-        }
-        destination->endpoint = endpoints;
-    }
-    for (endpoint = 0; endpoint < source->bNumEndpoints; ++endpoint) {
-        endpoints[endpoint].bLength = source->endpoints[endpoint].bLength;
-        endpoints[endpoint].bDescriptorType = source->endpoints[endpoint].bDescriptorType;
-        endpoints[endpoint].bEndpointAddress = source->endpoints[endpoint].bEndpointAddress;
-        endpoints[endpoint].bmAttributes = source->endpoints[endpoint].bmAttributes;
-        endpoints[endpoint].wMaxPacketSize = source->endpoints[endpoint].wMaxPacketSize;
-        endpoints[endpoint].bInterval = source->endpoints[endpoint].bInterval;
-    }
-    return true;
-}
-
 int libusb_get_config_descriptor(libusb_device *device, uint8_t config_index,
                                  struct libusb_config_descriptor **config_out) {
-    const usb_devdesc *source;
-    usb_configurationdesc *source_config;
+    const unsigned char *source;
+    size_t length;
     struct libusb_config_descriptor *config;
     struct libusb_interface *interfaces;
     uint8_t max_interface = 0;
-    uint8_t source_index;
+    size_t offset;
 
     if (device == NULL || config_out == NULL) return LIBUSB_ERROR_INVALID_PARAM;
-    if (!device->descriptors_ready) return LIBUSB_ERROR_NO_DEVICE;
-    source = &device->descriptors;
-    if (config_index >= source->bNumConfigurations) return LIBUSB_ERROR_NOT_FOUND;
-    source_config = &source->configurations[config_index];
-    for (source_index = 0; source_index < source_config->bNumInterfaces;
-         ++source_index) {
-        if (source_config->interfaces[source_index].bInterfaceNumber > max_interface)
-            max_interface = source_config->interfaces[source_index].bInterfaceNumber;
+    if (config_index != 0 || device->configuration == NULL)
+        return LIBUSB_ERROR_NOT_FOUND;
+    source = device->configuration;
+    length = device->configuration_length;
+    for (offset = source[0]; offset + 2 <= length; offset += source[offset]) {
+        if (source[offset] < 2 || offset + source[offset] > length) break;
+        if (source[offset + 1] == USB_DT_INTERFACE &&
+            source[offset] >= USB_DT_INTERFACE_SIZE &&
+            source[offset + 2] > max_interface)
+            max_interface = source[offset + 2];
     }
 
     config = calloc(1, sizeof(*config));
@@ -280,45 +437,117 @@ int libusb_get_config_descriptor(libusb_device *device, uint8_t config_index,
         free(interfaces);
         return LIBUSB_ERROR_NO_MEM;
     }
-    config->bLength = source_config->bLength;
-    config->bDescriptorType = source_config->bDescriptorType;
-    config->wTotalLength = source_config->wTotalLength;
+    config->bLength = source[0];
+    config->bDescriptorType = source[1];
+    config->wTotalLength = read_le16(source + 2);
     config->bNumInterfaces = max_interface + 1;
-    config->bConfigurationValue = source_config->bConfigurationValue;
-    config->iConfiguration = source_config->iConfiguration;
-    config->bmAttributes = source_config->bmAttributes;
-    config->MaxPower = source_config->bMaxPower;
+    config->bConfigurationValue = source[5];
+    config->iConfiguration = source[6];
+    config->bmAttributes = source[7];
+    config->MaxPower = source[8];
     config->interface = interfaces;
 
-    for (source_index = 0; source_index < source_config->bNumInterfaces;
-         ++source_index) {
-        uint8_t number = source_config->interfaces[source_index].bInterfaceNumber;
-        ++interfaces[number].num_altsetting;
+    for (offset = source[0]; offset + 2 <= length; offset += source[offset]) {
+        if (source[offset] < 2 || offset + source[offset] > length) break;
+        if (source[offset + 1] == USB_DT_INTERFACE &&
+            source[offset] >= USB_DT_INTERFACE_SIZE)
+            ++interfaces[source[offset + 2]].num_altsetting;
     }
-    for (source_index = 0; source_index <= max_interface; ++source_index) {
-        int count = interfaces[source_index].num_altsetting;
+    for (offset = 0; offset <= max_interface; ++offset) {
+        int count = interfaces[offset].num_altsetting;
         if (count > 0) {
-            interfaces[source_index].altsetting =
+            interfaces[offset].altsetting =
                 calloc((size_t)count, sizeof(struct libusb_interface_descriptor));
-            if (interfaces[source_index].altsetting == NULL) {
+            if (interfaces[offset].altsetting == NULL) {
                 libusb_free_config_descriptor(config);
                 return LIBUSB_ERROR_NO_MEM;
             }
-            interfaces[source_index].num_altsetting = 0;
+            interfaces[offset].num_altsetting = 0;
         }
     }
-    for (source_index = 0; source_index < source_config->bNumInterfaces;
-         ++source_index) {
-        uint8_t number = source_config->interfaces[source_index].bInterfaceNumber;
-        struct libusb_interface_descriptor *settings =
-            (struct libusb_interface_descriptor *)interfaces[number].altsetting;
-        int alternate = interfaces[number].num_altsetting;
-        if (!copy_interface_descriptor(&settings[alternate],
-                                       &source_config->interfaces[source_index])) {
-            libusb_free_config_descriptor(config);
-            return LIBUSB_ERROR_NO_MEM;
+
+    offset = source[0];
+    while (offset + USB_DT_INTERFACE_SIZE <= length) {
+        const unsigned char *raw = source + offset;
+        size_t end;
+        size_t cursor;
+        uint8_t number;
+        int alternate;
+        struct libusb_interface_descriptor *settings;
+        struct libusb_interface_descriptor *destination;
+        struct libusb_endpoint_descriptor *endpoints = NULL;
+        unsigned int endpoint_index = 0;
+
+        if (raw[0] < 2 || offset + raw[0] > length) break;
+        if (raw[1] != USB_DT_INTERFACE || raw[0] < USB_DT_INTERFACE_SIZE) {
+            offset += raw[0];
+            continue;
+        }
+        end = offset + raw[0];
+        while (end + 2 <= length) {
+            if (source[end] < 2 || end + source[end] > length) break;
+            if (source[end + 1] == USB_DT_INTERFACE) break;
+            end += source[end];
+        }
+        number = raw[2];
+        alternate = interfaces[number].num_altsetting;
+        settings = (struct libusb_interface_descriptor *)interfaces[number].altsetting;
+        destination = &settings[alternate];
+        destination->bLength = raw[0];
+        destination->bDescriptorType = raw[1];
+        destination->bInterfaceNumber = number;
+        destination->bAlternateSetting = raw[3];
+        destination->bNumEndpoints = raw[4];
+        destination->bInterfaceClass = raw[5];
+        destination->bInterfaceSubClass = raw[6];
+        destination->bInterfaceProtocol = raw[7];
+        destination->iInterface = raw[8];
+
+        cursor = offset + raw[0];
+        {
+            size_t extra_end = cursor;
+            while (extra_end + 2 <= end && source[extra_end + 1] != USB_DT_ENDPOINT) {
+                if (source[extra_end] < 2 || extra_end + source[extra_end] > end)
+                    break;
+                extra_end += source[extra_end];
+            }
+            if (extra_end > cursor) {
+                unsigned char *extra = malloc(extra_end - cursor);
+                if (extra == NULL) {
+                    libusb_free_config_descriptor(config);
+                    return LIBUSB_ERROR_NO_MEM;
+                }
+                memcpy(extra, source + cursor, extra_end - cursor);
+                destination->extra = extra;
+                destination->extra_length = (int)(extra_end - cursor);
+            }
+        }
+        if (destination->bNumEndpoints > 0) {
+            endpoints = calloc(destination->bNumEndpoints, sizeof(*endpoints));
+            if (endpoints == NULL) {
+                libusb_free_config_descriptor(config);
+                return LIBUSB_ERROR_NO_MEM;
+            }
+            destination->endpoint = endpoints;
+        }
+        for (cursor = offset + raw[0]; cursor + 2 <= end; cursor += source[cursor]) {
+            const unsigned char *endpoint = source + cursor;
+            if (endpoint[0] < 2 || cursor + endpoint[0] > end) break;
+            if (endpoint[1] != USB_DT_ENDPOINT || endpoint[0] < USB_DT_ENDPOINT_SIZE ||
+                endpoint_index >= destination->bNumEndpoints)
+                continue;
+            endpoints[endpoint_index].bLength = endpoint[0];
+            endpoints[endpoint_index].bDescriptorType = endpoint[1];
+            endpoints[endpoint_index].bEndpointAddress = endpoint[2];
+            endpoints[endpoint_index].bmAttributes = endpoint[3];
+            endpoints[endpoint_index].wMaxPacketSize = read_le16(endpoint + 4);
+            endpoints[endpoint_index].bInterval = endpoint[6];
+            if (endpoint[0] >= 8) endpoints[endpoint_index].bRefresh = endpoint[7];
+            if (endpoint[0] >= 9) endpoints[endpoint_index].bSynchAddress = endpoint[8];
+            ++endpoint_index;
         }
         ++interfaces[number].num_altsetting;
+        offset = end;
     }
     *config_out = config;
     return LIBUSB_SUCCESS;
@@ -339,7 +568,7 @@ int libusb_open(libusb_device *device, libusb_device_handle **handle_out) {
     if (device == NULL || handle_out == NULL) return LIBUSB_ERROR_INVALID_PARAM;
     handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return LIBUSB_ERROR_NO_MEM;
-    result = open_legacy_device(device, &handle->fd);
+    result = open_device(device, &handle->fd);
     if (result != LIBUSB_SUCCESS) {
         free(handle);
         return result;
@@ -395,8 +624,10 @@ int libusb_attach_kernel_driver(libusb_device_handle *handle, int interface_numb
 int libusb_set_interface_alt_setting(libusb_device_handle *handle,
                                      int interface_number, int alternate_setting) {
     int result;
+    int32_t fd;
     if (handle == NULL) return LIBUSB_ERROR_INVALID_PARAM;
-    result = USB_SetAlternativeInterface(handle->fd, (uint8_t)interface_number,
+    fd = device_id_for_interface(handle->device, (unsigned int)interface_number);
+    result = USB_SetAlternativeInterface(fd, (uint8_t)interface_number,
                                          (uint8_t)alternate_setting);
     return map_ios_error(result);
 }
@@ -407,6 +638,7 @@ int libusb_control_transfer(libusb_device_handle *handle, uint8_t request_type,
                             unsigned int timeout) {
     unsigned char *aligned = NULL;
     int result;
+    int32_t fd;
     (void)timeout;
     if (handle == NULL || (length > 0 && data == NULL))
         return LIBUSB_ERROR_INVALID_PARAM;
@@ -415,11 +647,12 @@ int libusb_control_transfer(libusb_device_handle *handle, uint8_t request_type,
         if (aligned == NULL) return LIBUSB_ERROR_NO_MEM;
         if ((request_type & LIBUSB_ENDPOINT_IN) == 0) memcpy(aligned, data, length);
     }
+    fd = device_id_for_interface(handle->device, index & 0xffu);
     if (request_type & LIBUSB_ENDPOINT_IN)
-        result = USB_ReadCtrlMsg(handle->fd, request_type, request, value, index,
+        result = USB_ReadCtrlMsg(fd, request_type, request, value, index,
                                  length, aligned);
     else
-        result = USB_WriteCtrlMsg(handle->fd, request_type, request, value, index,
+        result = USB_WriteCtrlMsg(fd, request_type, request, value, index,
                                   length, aligned);
     if (result >= 0 && length > 0 && (request_type & LIBUSB_ENDPOINT_IN))
         memcpy(data, aligned, length);
@@ -525,6 +758,7 @@ static int transfer_complete(int result, void *user_data) {
 int libusb_submit_transfer(struct libusb_transfer *public_transfer) {
     wii_transfer_t *transfer;
     int result;
+    int32_t fd;
     if (public_transfer == NULL || public_transfer->dev_handle == NULL ||
         public_transfer->buffer == NULL)
         return LIBUSB_ERROR_INVALID_PARAM;
@@ -541,20 +775,22 @@ int libusb_submit_transfer(struct libusb_transfer *public_transfer) {
     }
     transfer->cancelled = false;
     transfer->in_flight = true;
+    fd = device_id_for_endpoint(public_transfer->dev_handle->device,
+                                public_transfer->endpoint);
     if (public_transfer->type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
-        result = USB_ReadIsoMsgAsync(public_transfer->dev_handle->fd,
+        result = USB_ReadIsoMsgAsync(fd,
                                      public_transfer->endpoint,
                                      (uint8_t)public_transfer->num_iso_packets,
                                      transfer->packet_sizes, transfer->dma_buffer,
                                      transfer_complete, transfer);
     } else if (public_transfer->type == LIBUSB_TRANSFER_TYPE_BULK) {
-        result = USB_ReadBlkMsgAsync(public_transfer->dev_handle->fd,
+        result = USB_ReadBlkMsgAsync(fd,
                                      public_transfer->endpoint,
                                      (uint16_t)public_transfer->length,
                                      transfer->dma_buffer,
                                      transfer_complete, transfer);
     } else if (public_transfer->type == LIBUSB_TRANSFER_TYPE_INTERRUPT) {
-        result = USB_ReadIntrMsgAsync(public_transfer->dev_handle->fd,
+        result = USB_ReadIntrMsgAsync(fd,
                                       public_transfer->endpoint,
                                       (uint16_t)public_transfer->length,
                                       transfer->dma_buffer,

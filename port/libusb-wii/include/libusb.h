@@ -190,6 +190,7 @@ int libusb_get_ss_endpoint_companion_descriptor(
     struct libusb_ss_endpoint_companion_descriptor **companion);
 void libusb_free_ss_endpoint_companion_descriptor(
     struct libusb_ss_endpoint_companion_descriptor *companion);
+const char *libusb_wii_last_error(void);
 
 static inline void libusb_fill_bulk_transfer(
     struct libusb_transfer *transfer, libusb_device_handle *handle,
@@ -248,4 +249,3 @@ static inline unsigned char *libusb_get_iso_packet_buffer_simple(
 #endif
 
 #endif
-

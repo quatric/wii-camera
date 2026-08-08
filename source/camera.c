@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libusb.h>
 #include <libuvc/libuvc.h>
 
 struct camera {
@@ -104,7 +105,10 @@ bool camera_start(camera_t *camera, uint32_t width, uint32_t height,
 
     result = uvc_find_device(camera->context, &camera->device, 0, 0, NULL);
     if (result < 0) {
-        set_error(error, error_size, "No UVC camera found", result);
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "No UVC camera: %s (%d)\n%s",
+                     uvc_strerror(result), result, libusb_wii_last_error());
+        }
         goto fail;
     }
 

@@ -5,16 +5,19 @@ uses through `port/libusb-wii`.
 
 ## Data path
 
-1. `libusb_get_device_list` enumerates non-HID USB devices through libogc.
-2. Each candidate is opened through IOS58's legacy `/dev/usb/oh0/VID/PID`
-   device path so the complete configuration and alternate settings are
-   visible to libuvc.
-3. libogc descriptors are deep-copied into libusb-compatible descriptor trees.
-   Alternate settings flattened by libogc are regrouped by interface number.
+1. `libusb_get_device_list` enumerates IOS58 `/dev/usb/ven` device IDs.
+2. The backend reads each candidate's raw device and configuration descriptors
+   with `GET_DESCRIPTOR`, preserving every interface alternate setting.
+3. Candidates must contain both UVC VideoControl and VideoStreaming interfaces.
+   IOS58 may expose a composite webcam once per interface, so matching entries
+   are collected into one libusb-compatible device and mapped by interface.
 4. libuvc performs its normal UVC probe and commit control requests.
-5. `libusb_submit_transfer` converts libuvc transfers to
+5. Control and streaming requests are routed to the IOS58 device ID belonging
+   to the target interface or endpoint. This is required for composite cameras
+   such as the Logitech C920.
+6. `libusb_submit_transfer` converts libuvc transfers to
    `USB_ReadIsoMsgAsync`, `USB_ReadBlkMsgAsync`, or `USB_ReadIntrMsgAsync`.
-6. IOS writes into 32-byte-aligned bounce buffers. Completion copies data into
+7. IOS writes into 32-byte-aligned bounce buffers. Completion copies data into
    libuvc's buffers and invokes the original libusb callback.
 
 ## Wii-specific libuvc changes
@@ -36,6 +39,7 @@ Two small changes are applied to the vendored libuvc source:
 5. Exit during streaming and confirm no shutdown hang.
 6. Repeat disconnect/reconnect tests with full-speed and high-speed webcams.
 
-If enumeration fails, first verify that `/dev/usb/oh0/VID/PID` can be opened on
-the active IOS. If streaming negotiation fails, log the advertised format and
-alternate-setting descriptors before changing the libuvc parser.
+If IOS58 enumeration produces no usable UVC device, the backend retains a
+legacy `/dev/usb/oh0/VID/PID` fallback. The app displays the backend's scan
+summary on failure, including the number of IOS USB entries and UVC devices;
+capture that line when reporting hardware-test results.
