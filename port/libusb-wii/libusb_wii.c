@@ -196,7 +196,7 @@ static int read_raw_descriptors(int32_t fd, libusb_device *device) {
     return LIBUSB_SUCCESS;
 }
 
-static bool configuration_is_uvc(const libusb_device *device) {
+static unsigned int configuration_uvc_mask(const libusb_device *device) {
     size_t offset = 0;
     bool control = false;
     bool streaming = false;
@@ -212,7 +212,7 @@ static bool configuration_is_uvc(const libusb_device *device) {
         }
         offset += descriptor[0];
     }
-    return control && streaming;
+    return (control ? 1u : 0u) | (streaming ? 2u : 0u);
 }
 
 int libusb_init(libusb_context **context) {
@@ -243,6 +243,7 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     unsigned int open_failures = 0;
     unsigned int descriptor_failures = 0;
     unsigned int incomplete_uvc = 0;
+    unsigned int last_uvc_mask = 0;
     int attempt;
     size_t i;
 
@@ -292,7 +293,8 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
             free(device);
             continue;
         }
-        if (!configuration_is_uvc(device)) {
+        last_uvc_mask = configuration_uvc_mask(device);
+        if (last_uvc_mask == 0) {
             ++incomplete_uvc;
             USB_CloseDevice(&fd);
             free(device->configuration);
@@ -326,7 +328,7 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
             initialize_interface_ids(device);
             if (open_device(device, &fd) == LIBUSB_SUCCESS &&
                 read_raw_descriptors(fd, device) == LIBUSB_SUCCESS &&
-                configuration_is_uvc(device)) {
+                configuration_uvc_mask(device) != 0) {
                 USB_CloseDevice(&fd);
                 devices[unique_count++] = device;
             } else {
@@ -339,13 +341,15 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     devices[unique_count] = NULL;
     if (unique_count > 0) {
         snprintf(wii_usb_status, sizeof(wii_usb_status),
-                 "IOS USB: %u entries, %u UVC device(s), %04x:%04x",
+                 "IOS USB: %u, UVC:%u %04x:%04x mask:%u",
                  count, (unsigned int)unique_count,
-                 devices[0]->vendor_id, devices[0]->product_id);
+                 devices[0]->vendor_id, devices[0]->product_id,
+                 last_uvc_mask);
     } else {
         snprintf(wii_usb_status, sizeof(wii_usb_status),
-                 "IOS USB: %u entries; open:%u desc:%u partial:%u",
-                 count, open_failures, descriptor_failures, incomplete_uvc);
+                 "IOS USB: %u; open:%u desc:%u nonuvc:%u mask:%u",
+                 count, open_failures, descriptor_failures, incomplete_uvc,
+                 last_uvc_mask);
     }
     *list = devices;
     return (ssize_t)unique_count;

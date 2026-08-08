@@ -114,7 +114,9 @@ bool camera_start(camera_t *camera, uint32_t width, uint32_t height,
 
     result = uvc_open(camera->device, &camera->handle);
     if (result < 0) {
-        set_error(error, error_size, "Could not open UVC camera", result);
+        if (error != NULL && error_size > 0)
+            snprintf(error, error_size, "Open UVC: %s (%d)\n%s",
+                     uvc_strerror(result), result, libusb_wii_last_error());
         goto fail;
     }
 
@@ -122,7 +124,9 @@ bool camera_start(camera_t *camera, uint32_t width, uint32_t height,
                                               UVC_FRAME_FORMAT_YUYV,
                                               (int)width, (int)height, (int)fps);
     if (result < 0) {
-        set_error(error, error_size, "Camera lacks requested YUYV mode", result);
+        if (error != NULL && error_size > 0)
+            snprintf(error, error_size, "YUYV mode: %s (%d)\n%s",
+                     uvc_strerror(result), result, libusb_wii_last_error());
         goto fail;
     }
 
