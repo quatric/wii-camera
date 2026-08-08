@@ -23,6 +23,7 @@ static unsigned int direct_stream_interface;
 static unsigned int direct_stream_alternate;
 static unsigned int direct_stream_endpoint;
 static unsigned int direct_stream_packet;
+static unsigned char direct_mjpeg_frame[512 * 1024];
 
 static uint32_t ehci_read(uint32_t address) {
     return *(volatile uint32_t *)address;
@@ -510,6 +511,82 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
            data[2], data[3]);
 }
 
+static void ehci_receive_frame_test(unsigned int device_address) {
+    enum { ISO_FRAMES = 64 };
+    const uint32_t command_register = 0xcd040010u;
+    const uint32_t status_register = 0xcd040014u;
+    ehci_itd_t *itds = (ehci_itd_t *)0x933e8000u;
+    uint32_t *frame_list = (uint32_t *)0x933e1000u;
+    unsigned char *dma = (unsigned char *)0x933ea000u;
+    unsigned int stride = direct_stream_packet * 8u;
+    unsigned int first_frame, i, u, packets = 0, errors = 0;
+    size_t frame_size = 0;
+    bool collecting = false, complete = false;
+
+    for (i = 0; i < 1024; ++i) frame_list[i] = ehci_dma_word(1u);
+    memset(itds, 0, sizeof(*itds) * ISO_FRAMES);
+    memset(dma, 0, stride * ISO_FRAMES);
+    first_frame = ((ehci_read(0xcd04001cu) >> 3) + 64u) & 0x3ffu;
+    for (i = 0; i < ISO_FRAMES; ++i) {
+        unsigned char *block = dma + i * stride;
+        uint32_t physical = ehci_physical(block);
+        uint32_t page0 = physical & ~0xfffu;
+        itds[i].next = ehci_dma_word(1u);
+        for (u = 0; u < 8; ++u) {
+            uint32_t address = physical + u * direct_stream_packet;
+            uint32_t page = (address >> 12) - (page0 >> 12);
+            uint32_t tx = 0x80000000u |
+                ((uint32_t)direct_stream_packet << 16) |
+                (page << 12) | (address & 0xfffu);
+            if (u == 7) tx |= 0x8000u;
+            itds[i].transaction[u] = ehci_dma_word(tx);
+        }
+        itds[i].buffer[0] = ehci_dma_word(page0 |
+            ((direct_stream_endpoint & 15u) << 8) | device_address);
+        itds[i].buffer[1] = ehci_dma_word(page0 + 0x1000u |
+                                         0x800u | direct_stream_packet);
+        itds[i].buffer[2] = ehci_dma_word(page0 + 0x2000u | 1u);
+        frame_list[(first_frame + i) & 0x3ffu] =
+            ehci_dma_word(ehci_physical(&itds[i]));
+    }
+    DCFlushRange(dma, stride * ISO_FRAMES);
+    DCFlushRange(itds, sizeof(*itds) * ISO_FRAMES);
+    DCFlushRange(frame_list, 4096);
+    ehci_write(0xcd040024u, ehci_physical(frame_list));
+    ehci_write(command_register, 0x00080011u);
+    usleep(180000);
+    ehci_write(command_register, 0x00080001u);
+    ehci_wait_bits(status_register, 0x4000u, 0, 100);
+    DCInvalidateRange(itds, sizeof(*itds) * ISO_FRAMES);
+    DCInvalidateRange(dma, stride * ISO_FRAMES);
+    for (i = 0; i < ISO_FRAMES && !complete; ++i) {
+        for (u = 0; u < 8 && !complete; ++u) {
+            uint32_t tx = __builtin_bswap32(itds[i].transaction[u]);
+            unsigned int length = (tx >> 16) & 0xfffu;
+            unsigned char *packet = dma + i * stride + u * direct_stream_packet;
+            unsigned int header;
+            if (tx & 0x70000000u) { ++errors; continue; }
+            if (tx & 0x80000000u || length < 2u) continue;
+            ++packets;
+            header = packet[0];
+            if (header < 2u || header > length || (packet[1] & 0x40u)) continue;
+            if (!collecting && length >= header + 2u &&
+                packet[header] == 0xffu && packet[header + 1] == 0xd8u)
+                collecting = true;
+            if (collecting && frame_size + length - header <= sizeof(direct_mjpeg_frame)) {
+                memcpy(direct_mjpeg_frame + frame_size, packet + header, length - header);
+                frame_size += length - header;
+                if (packet[1] & 2u) complete = true;
+            }
+        }
+    }
+    printf("MJPEG packets:%u err:%u complete:%u size:%lu\n", packets, errors,
+           complete, (unsigned long)frame_size);
+    printf("MJPEG data:%02x %02x end:%02x %02x\n", direct_mjpeg_frame[0],
+           direct_mjpeg_frame[1], frame_size > 1 ? direct_mjpeg_frame[frame_size-2] : 0,
+           frame_size ? direct_mjpeg_frame[frame_size-1] : 0);
+}
+
 static void print_ehci_probe(void) {
     uint32_t capability = ehci_read(0xcd040000u);
     uint32_t command = ehci_read(0xcd040010u);
@@ -597,7 +674,7 @@ static void run_ehci_takeover_probe(void) {
         printf("UVC active IF:%u alt:%u EP:%02x packet:%u\n",
                direct_stream_interface, direct_stream_alternate,
                direct_stream_endpoint, direct_stream_packet);
-        ehci_receive_isochronous_test(active_address);
+        ehci_receive_frame_test(active_address);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
                enumeration_stage,
@@ -703,7 +780,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.29\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.30\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
