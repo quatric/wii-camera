@@ -13,6 +13,8 @@
 #define WII_USB_VIDEO_CLASS 14
 #define WII_USB_MAX_INTERFACES 32
 #define WII_USB_NO_DEVICE_ID INT32_MIN
+#define LOGITECH_VENDOR_ID 0x046d
+#define LOGITECH_C920_PRODUCT_ID 0x082d
 
 struct libusb_context {
     bool initialized;
@@ -262,7 +264,6 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     size_t unique_count = 0;
     unsigned int open_failures = 0;
     unsigned int descriptor_failures = 0;
-    unsigned int incomplete_uvc = 0;
     unsigned int last_uvc_mask = 0;
     unsigned int last_interface = 0xffu;
     unsigned int last_class = 0xffu;
@@ -283,7 +284,7 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
         usleep(20000);
     }
 
-    devices = calloc((size_t)count + 1, sizeof(*devices));
+    devices = calloc(WII_USB_MAX_DEVICES + 1, sizeof(*devices));
     if (devices == NULL) return LIBUSB_ERROR_NO_MEM;
     for (i = 0; i < count; ++i) {
         size_t duplicate;
@@ -324,7 +325,6 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
         configuration_first_interface(device, &last_interface, &last_class,
                                       &last_subclass);
         if (last_uvc_mask == 0) {
-            ++incomplete_uvc;
             USB_CloseDevice(&fd);
             free(device->configuration);
             free(device);
@@ -362,6 +362,43 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
                 devices[unique_count++] = device;
             } else {
                 if (fd >= 0) USB_CloseDevice(&fd);
+                free(device->configuration);
+                free(device);
+            }
+        }
+    }
+    /* IOS58 does not necessarily publish composite isochronous webcams in
+     * /dev/usb/ven. Probe the requested C920 directly through OH0 even when
+     * it is absent from USB_GetDeviceList. */
+    if (unique_count == 0) {
+        libusb_device *device = calloc(1, sizeof(*device));
+        int32_t fd = -1;
+        if (device != NULL) {
+            device->references = 1;
+            device->vendor_id = LOGITECH_VENDOR_ID;
+            device->product_id = LOGITECH_C920_PRODUCT_ID;
+            device->address = 1;
+            device->device_id = USB_OH0_DEVICE_ID;
+            initialize_interface_ids(device);
+            last_vendor = device->vendor_id;
+            last_product = device->product_id;
+            if (open_device(device, &fd) != LIBUSB_SUCCESS) {
+                ++open_failures;
+                free(device);
+            } else if (read_raw_descriptors(fd, device) == LIBUSB_SUCCESS) {
+                last_uvc_mask = configuration_uvc_mask(device);
+                configuration_first_interface(device, &last_interface,
+                                              &last_class, &last_subclass);
+                if (last_uvc_mask != 0)
+                    devices[unique_count++] = device;
+                else {
+                    free(device->configuration);
+                    free(device);
+                }
+                USB_CloseDevice(&fd);
+            } else {
+                ++descriptor_failures;
+                USB_CloseDevice(&fd);
                 free(device->configuration);
                 free(device);
             }
