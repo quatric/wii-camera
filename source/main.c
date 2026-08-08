@@ -817,7 +817,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.35\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.36\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
     run_ehci_takeover_probe();
@@ -838,9 +838,12 @@ int main(void) {
         printf("JPEG not saved size:%lu baseline:%u\n",
                (unsigned long)direct_mjpeg_size, direct_mjpeg_baseline);
     }
-    printf("\nReturning to loader in 5 seconds...\n");
+    printf("\nReturning to the Wii Menu in 5 seconds...\n");
     sleep(5);
-    goto cleanup;
+    fatUnmount("sd:");
+    fatUnmount("usb:");
+    SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
+    for (;;) VIDEO_WaitVSync();
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
 
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
