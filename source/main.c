@@ -442,6 +442,9 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
     bool periodic_started;
     uint32_t start_status;
     uint32_t start_command;
+    uint32_t start_index;
+    uint32_t end_index;
+    uint32_t final_transaction;
 
     memset(itd, 0, sizeof(*itd));
     for (frame = 0; frame < 1024; ++frame)
@@ -466,13 +469,14 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
     DCFlushRange(itd, sizeof(*itd));
     DCFlushRange(frame_list, 4096);
     ehci_write(periodic_register, ehci_physical(frame_list));
+    start_index = ehci_read(frame_index_register);
+    frame = ((start_index >> 3) + 64u) & 0x3ffu;
+    frame_list[frame] = ehci_dma_word(ehci_physical(itd));
+    DCFlushRange(&frame_list[frame], sizeof(frame_list[frame]));
     ehci_write(command_register, 0x00080011u);
     periodic_started = ehci_wait_bits(status_register, 0x4000u, 0x4000u, 100);
     start_status = ehci_read(status_register);
     start_command = ehci_read(command_register);
-    frame = ((ehci_read(frame_index_register) >> 3) + 8u) & 0x3ffu;
-    frame_list[frame] = ehci_dma_word(ehci_physical(itd));
-    DCFlushRange(&frame_list[frame], sizeof(frame_list[frame]));
     for (microframe = 0; microframe < 200; ++microframe) {
         DCInvalidateRange(itd, sizeof(*itd));
         if ((__builtin_bswap32(itd->transaction[7]) & 0x80000000u) == 0)
@@ -483,6 +487,8 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
     ehci_wait_bits(status_register, 0x4000u, 0, 100);
     DCInvalidateRange(itd, sizeof(*itd));
     DCInvalidateRange(data, direct_stream_packet * 8u);
+    end_index = ehci_read(frame_index_register);
+    final_transaction = __builtin_bswap32(itd->transaction[0]);
     for (microframe = 0; microframe < 8; ++microframe) {
         uint32_t transaction = __builtin_bswap32(itd->transaction[microframe]);
         if ((transaction & 0x80000000u) == 0) ++complete;
@@ -492,9 +498,14 @@ static void ehci_receive_isochronous_test(unsigned int device_address) {
     printf("ISO pse:%u cmd:%08lx start:%08lx frame:%u done:%u err:%u\n",
            periodic_started, (unsigned long)start_command,
            (unsigned long)start_status, frame, complete, errors);
-    printf("ISO bytes:%u sts:%08lx data:%02x %02x %02x %02x %02x %02x\n",
-           bytes, (unsigned long)ehci_read(status_register), data[0], data[1],
-           data[2], data[3], data[4], data[5]);
+    printf("ISO fi:%04lx>%04lx base:%08lx link:%08lx tx:%08lx\n",
+           (unsigned long)start_index, (unsigned long)end_index,
+           (unsigned long)ehci_read(periodic_register),
+           (unsigned long)__builtin_bswap32(frame_list[frame]),
+           (unsigned long)final_transaction);
+    printf("ISO bytes:%u sts:%08lx data:%02x %02x %02x %02x\n", bytes,
+           (unsigned long)ehci_read(status_register), data[0], data[1],
+           data[2], data[3]);
 }
 
 static void print_ehci_probe(void) {
@@ -690,7 +701,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.26\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.27\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
