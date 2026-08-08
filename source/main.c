@@ -230,6 +230,15 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
                                direct_configuration, final_token,
                                live_status, live_command, trace))
         return false;
+    {
+        unsigned char set_configuration[8] =
+            {0x00, 0x09, config_header[5], 0x00, 0x00, 0x00, 0x00, 0x00};
+        *stage = 6;
+        if (!ehci_control_transfer(*active_address, set_configuration, 0,
+                                   false, NULL, final_token, live_status,
+                                   live_command, trace))
+            return false;
+    }
     return true;
 }
 
@@ -239,12 +248,22 @@ static void summarize_uvc_configuration(unsigned int length) {
     unsigned int video_streaming = 0;
     unsigned int streaming_alternates = 0;
     unsigned int isochronous_endpoints = 0;
+    unsigned int current_interface = 0xffu;
+    unsigned int current_alternate = 0;
+    bool current_streaming = false;
+    unsigned int best_interface = 0xffu;
+    unsigned int best_alternate = 0;
+    unsigned int best_endpoint = 0;
+    unsigned int best_packet = 0;
     while (offset + 2u <= length) {
         const unsigned char *descriptor = direct_configuration + offset;
         unsigned int descriptor_length = descriptor[0];
         if (descriptor_length < 2u || offset + descriptor_length > length)
             break;
         if (descriptor[1] == 4 && descriptor_length >= 9u) {
+            current_interface = descriptor[2];
+            current_alternate = descriptor[3];
+            current_streaming = descriptor[5] == 14 && descriptor[6] == 2;
             if (descriptor[5] == 14 && descriptor[6] == 1) ++video_control;
             if (descriptor[5] == 14 && descriptor[6] == 2) {
                 ++video_streaming;
@@ -252,13 +271,26 @@ static void summarize_uvc_configuration(unsigned int length) {
             }
         } else if (descriptor[1] == 5 && descriptor_length >= 7u &&
                    (descriptor[3] & 3u) == 1u) {
+            unsigned int packet = (unsigned int)descriptor[4] |
+                                  ((unsigned int)descriptor[5] << 8);
+            unsigned int payload = (packet & 0x7ffu) *
+                                   (1u + ((packet >> 11) & 3u));
             ++isochronous_endpoints;
+            if (current_streaming && (descriptor[2] & 0x80u) &&
+                payload > best_packet) {
+                best_interface = current_interface;
+                best_alternate = current_alternate;
+                best_endpoint = descriptor[2];
+                best_packet = payload;
+            }
         }
         offset += descriptor_length;
     }
     printf("UVC full:%u VC:%u VS:%u alts:%u iso:%u\n", length,
            video_control, video_streaming, streaming_alternates,
            isochronous_endpoints);
+    printf("UVC cfg set IF:%u alt:%u EP:%02x max:%u\n",
+           best_interface, best_alternate, best_endpoint, best_packet);
 }
 
 static void print_ehci_probe(void) {
@@ -440,7 +472,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.20\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.21\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
