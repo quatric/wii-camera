@@ -193,7 +193,11 @@ static void run_ehci_takeover_probe(void) {
     ehci_write(async_register, 0);
     ehci_write(0xcd0400ccu, ehci_read(0xcd0400ccu) | (1u << 15));
     ehci_write(config_register, 1);
-    port = ehci_read(port_register) & ~(0x2au | 0x100u);
+    /* EHCI requires CMD_RUN before root-hub reset signalling. Clear PE when
+     * asserting reset so the device returns to USB address zero. */
+    ehci_write(command_register, 0x00080001u);
+    ehci_wait_bits(status_register, 0x1000u, 0, 100);
+    port = ehci_read(port_register) & ~(0x2au | 0x100u | 0x4u);
     ehci_write(port_register, port | 0x1000u | 0x100u);
     usleep(50000);
     port = ehci_read(port_register) & ~(0x2au | 0x100u);
@@ -315,7 +319,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.13\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.14\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
