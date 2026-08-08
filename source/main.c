@@ -53,7 +53,7 @@ typedef struct __attribute__((aligned(32))) {
 } ehci_qh_t;
 
 static uint32_t ehci_dma_word(uint32_t value) {
-    return __builtin_bswap32(value);
+    return value;
 }
 
 static uint32_t ehci_physical(const void *pointer) {
@@ -74,7 +74,9 @@ static void ehci_qtd_initialize(ehci_qtd_t *qtd, ehci_qtd_t *next,
 }
 
 static bool ehci_get_device_descriptor(unsigned char descriptor[18],
-                                       uint32_t *final_token) {
+                                       uint32_t *final_token,
+                                       uint32_t *live_status,
+                                       uint32_t *live_command) {
     ehci_qh_t *qh = memalign(32, 64);
     ehci_qtd_t *qtd = memalign(32, sizeof(ehci_qtd_t) * 3);
     unsigned char *setup = memalign(32, 32);
@@ -116,13 +118,15 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
 
     for (elapsed = 0; elapsed < 500; ++elapsed) {
         DCInvalidateRange(&qtd[2], sizeof(qtd[2]));
-        *final_token = __builtin_bswap32(qtd[2].token);
+        *final_token = qtd[2].token;
         if ((*final_token & 0x80u) == 0) {
             completed = (*final_token & 0x7cu) == 0;
             break;
         }
         usleep(1000);
     }
+    *live_status = ehci_read(0xcd040014u);
+    *live_command = ehci_read(0xcd040010u);
     ehci_write(0xcd040010u, 0);
     ehci_wait_bits(0xcd040014u, 0x1000u, 0x1000u, 100);
     DCInvalidateRange(data, 32);
@@ -156,6 +160,8 @@ static void run_ehci_takeover_probe(void) {
     bool port_reset_done;
     unsigned char descriptor[18];
     uint32_t transfer_token = 0xffffffffu;
+    uint32_t transfer_status = 0xffffffffu;
+    uint32_t transfer_command = 0xffffffffu;
     bool descriptor_ok;
 
     ehci_write(interrupt_register, 0);
@@ -178,15 +184,18 @@ static void run_ehci_takeover_probe(void) {
     printf("EHCI take halt:%u reset:%u preset:%u port:%08lx\n",
            halted, reset_done, port_reset_done,
            (unsigned long)ehci_read(port_register));
-    descriptor_ok = ehci_get_device_descriptor(descriptor, &transfer_token);
+    descriptor_ok = ehci_get_device_descriptor(descriptor, &transfer_token,
+                                               &transfer_status,
+                                               &transfer_command);
     if (descriptor_ok) {
         printf("EHCI dev %02x%02x VID:%02x%02x PID:%02x%02x mps:%u\n",
                descriptor[0], descriptor[1], descriptor[9], descriptor[8],
                descriptor[11], descriptor[10], descriptor[7]);
     } else {
-        printf("EHCI GET_DESCRIPTOR failed token:%08lx sts:%08lx\n",
+        printf("EHCI GET_DESC fail tok:%08lx sts:%08lx cmd:%08lx\n",
                (unsigned long)transfer_token,
-               (unsigned long)ehci_read(status_register));
+               (unsigned long)transfer_status,
+               (unsigned long)transfer_command);
     }
 }
 
@@ -279,7 +288,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.7\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.8\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
