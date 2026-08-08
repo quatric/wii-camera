@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <wiiuse/wpad.h>
 
 #define CAPTURE_WIDTH  640
@@ -21,6 +22,20 @@ static uint32_t ehci_read(uint32_t address) {
     return *(volatile uint32_t *)address;
 }
 
+static void ehci_write(uint32_t address, uint32_t value) {
+    *(volatile uint32_t *)address = value;
+    __asm__ volatile("eieio; sync" ::: "memory");
+}
+
+static bool ehci_wait_bits(uint32_t address, uint32_t mask, uint32_t value,
+                           unsigned int milliseconds) {
+    while (milliseconds-- > 0) {
+        if ((ehci_read(address) & mask) == value) return true;
+        usleep(1000);
+    }
+    return false;
+}
+
 static void print_ehci_probe(void) {
     uint32_t capability = ehci_read(0xcd040000u);
     uint32_t command = ehci_read(0xcd040010u);
@@ -29,6 +44,42 @@ static void print_ehci_probe(void) {
     printf("EHCI raw cap:%08lx cmd:%08lx sts:%08lx port:%08lx\n",
            (unsigned long)capability, (unsigned long)command,
            (unsigned long)status, (unsigned long)port);
+}
+
+static void run_ehci_takeover_probe(void) {
+    const uint32_t command_register = 0xcd040010u;
+    const uint32_t status_register = 0xcd040014u;
+    const uint32_t interrupt_register = 0xcd040018u;
+    const uint32_t periodic_register = 0xcd040024u;
+    const uint32_t async_register = 0xcd040028u;
+    const uint32_t config_register = 0xcd040050u;
+    const uint32_t port_register = 0xcd040054u;
+    uint32_t command = ehci_read(command_register);
+    uint32_t port;
+    bool halted;
+    bool reset_done;
+    bool port_reset_done;
+
+    ehci_write(interrupt_register, 0);
+    ehci_write(command_register, command & ~1u);
+    halted = ehci_wait_bits(status_register, 0x1000u, 0x1000u, 100);
+    ehci_write(command_register, (command & ~1u) | 2u);
+    reset_done = ehci_wait_bits(command_register, 2u, 0, 100);
+
+    ehci_write(periodic_register, 0);
+    ehci_write(async_register, 0);
+    ehci_write(config_register, 1);
+    port = ehci_read(port_register) & ~(0x2au | 0x100u);
+    ehci_write(port_register, port | 0x1000u | 0x100u);
+    usleep(50000);
+    port = ehci_read(port_register) & ~(0x2au | 0x100u);
+    ehci_write(port_register, port | 0x1000u);
+    port_reset_done = ehci_wait_bits(port_register, 0x100u, 0, 100);
+    usleep(20000);
+
+    printf("EHCI take halt:%u reset:%u preset:%u port:%08lx\n",
+           halted, reset_done, port_reset_done,
+           (unsigned long)ehci_read(port_register));
 }
 
 static void request_exit(void) {
@@ -120,8 +171,12 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.5\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.6\n\n");
     print_ehci_probe();
+    run_ehci_takeover_probe();
+    printf("Direct EHCI takeover test complete. HOME/B exits.\n");
+    wait_for_exit_button();
+    goto cleanup;
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
 
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
