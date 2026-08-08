@@ -163,8 +163,11 @@ static bool ehci_control_transfer(unsigned int device_address,
     trace[6] = __builtin_bswap32(qh->horizontal);
     trace[7] = __builtin_bswap32(qh->endpoint);
     trace[8] = __builtin_bswap32(qh->capabilities);
-    ehci_write(0xcd040010u, 0);
-    ehci_wait_bits(0xcd040014u, 0x1000u, 0x1000u, 100);
+    /* Leave CMD_RUN asserted so the camera continues receiving SOFs between
+     * control requests. Only quiesce the asynchronous schedule before its
+     * DMA structures are reused. */
+    ehci_write(0xcd040010u, 0x00080001u);
+    ehci_wait_bits(0xcd040014u, 0x8000u, 0, 100);
     DCInvalidateRange(data, 32);
     if (completed && direction_in && result != NULL && length > 0)
         memcpy(result, data, length);
@@ -386,7 +389,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.17\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.18\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
