@@ -377,7 +377,7 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
     return true;
 }
 
-static void summarize_uvc_configuration(unsigned int length) {
+static void __attribute__((unused)) summarize_uvc_configuration(unsigned int length) {
     unsigned int offset = 0;
     unsigned int video_control = 0;
     unsigned int video_streaming = 0;
@@ -428,7 +428,7 @@ static void summarize_uvc_configuration(unsigned int length) {
            best_interface, best_alternate, best_endpoint, best_packet);
 }
 
-static void ehci_receive_isochronous_test(unsigned int device_address) {
+static void __attribute__((unused)) ehci_receive_isochronous_test(unsigned int device_address) {
     const uint32_t command_register = 0xcd040010u;
     const uint32_t status_register = 0xcd040014u;
     const uint32_t frame_index_register = 0xcd04001cu;
@@ -545,9 +545,9 @@ static void ehci_receive_frame_test(unsigned int device_address) {
         }
         itds[i].buffer[0] = ehci_dma_word(page0 |
             ((direct_stream_endpoint & 15u) << 8) | device_address);
-        itds[i].buffer[1] = ehci_dma_word(page0 + 0x1000u |
+        itds[i].buffer[1] = ehci_dma_word((page0 + 0x1000u) |
                                          0x800u | direct_stream_packet);
-        itds[i].buffer[2] = ehci_dma_word(page0 + 0x2000u | 1u);
+        itds[i].buffer[2] = ehci_dma_word((page0 + 0x2000u) | 1u);
         frame_list[(first_frame + i) & 0x3ffu] =
             ehci_dma_word(ehci_physical(&itds[i]));
     }
@@ -582,11 +582,8 @@ static void ehci_receive_frame_test(unsigned int device_address) {
             }
         }
     }
-    printf("MJPEG packets:%u err:%u complete:%u size:%lu\n", packets, errors,
-           complete, (unsigned long)frame_size);
-    printf("MJPEG data:%02x %02x end:%02x %02x\n", direct_mjpeg_frame[0],
-           direct_mjpeg_frame[1], frame_size > 1 ? direct_mjpeg_frame[frame_size-2] : 0,
-           frame_size ? direct_mjpeg_frame[frame_size-1] : 0);
+    (void)packets;
+    (void)errors;
     if (complete) {
         size_t p;
         for (p = frame_size; p >= 2; --p) {
@@ -608,7 +605,7 @@ static void ehci_receive_frame_test(unsigned int device_address) {
     }
 }
 
-static void print_ehci_probe(void) {
+static void __attribute__((unused)) print_ehci_probe(void) {
     uint32_t capability = ehci_read(0xcd040000u);
     uint32_t command = ehci_read(0xcd040010u);
     uint32_t status = ehci_read(0xcd040014u);
@@ -664,9 +661,9 @@ static void run_ehci_takeover_probe(void) {
     port_reset_done = ehci_wait_bits(port_register, 0x100u, 0, 100);
     usleep(20000);
 
-    printf("EHCI take halt:%u reset:%u preset:%u port:%08lx\n",
-           halted, reset_done, port_reset_done,
-           (unsigned long)ehci_read(port_register));
+    (void)halted;
+    (void)reset_done;
+    (void)port_reset_done;
     descriptor_ok = ehci_enumerate_device(descriptor, config_header,
                                           &transfer_token, &transfer_status,
                                           &transfer_command, trace,
@@ -674,27 +671,9 @@ static void run_ehci_takeover_probe(void) {
                                           &active_address,
                                           &configuration_length);
     if (descriptor_ok) {
-        printf("EHCI dev %02x%02x VID:%02x%02x PID:%02x%02x mps:%u\n",
-               descriptor[0], descriptor[1], descriptor[9], descriptor[8],
-               descriptor[11], descriptor[10], descriptor[7]);
-        printf("EHCI addr:%u cfglen:%u interfaces:%u cfgval:%u\n",
-               active_address,
-               configuration_length,
-               config_header[4], config_header[5]);
-        summarize_uvc_configuration(configuration_length);
-        printf("UVC probe fmt:%u frame:%u interval:%lu payload:%lu\n",
-               direct_probe_control[2], direct_probe_control[3],
-               (unsigned long)((uint32_t)direct_probe_control[4] |
-                 ((uint32_t)direct_probe_control[5] << 8) |
-                 ((uint32_t)direct_probe_control[6] << 16) |
-                 ((uint32_t)direct_probe_control[7] << 24)),
-               (unsigned long)((uint32_t)direct_probe_control[22] |
-                 ((uint32_t)direct_probe_control[23] << 8) |
-                 ((uint32_t)direct_probe_control[24] << 16) |
-                 ((uint32_t)direct_probe_control[25] << 24)));
-        printf("UVC active IF:%u alt:%u EP:%02x packet:%u\n",
-               direct_stream_interface, direct_stream_alternate,
-               direct_stream_endpoint, direct_stream_packet);
+        printf("Camera connected: %02x%02x:%02x%02x\n",
+               descriptor[9], descriptor[8], descriptor[11], descriptor[10]);
+        printf("Capturing 640x480 MJPEG...\n");
         ehci_receive_frame_test(active_address);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
@@ -801,10 +780,9 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.31\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.32\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
-    print_ehci_probe();
     run_ehci_takeover_probe();
     if (storage_ready && direct_mjpeg_size > 0 && direct_mjpeg_baseline &&
         storage_next_filename(folder, path, sizeof(path))) {
@@ -823,7 +801,7 @@ int main(void) {
         printf("JPEG not saved size:%lu baseline:%u\n",
                (unsigned long)direct_mjpeg_size, direct_mjpeg_baseline);
     }
-    printf("Direct EHCI takeover test complete. HOME/B exits.\n");
+    printf("\nHOME/B: Exit\n");
     wait_for_exit_button();
     goto cleanup;
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
