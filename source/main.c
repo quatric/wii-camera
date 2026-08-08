@@ -19,6 +19,10 @@
 static volatile bool exit_requested;
 static unsigned char direct_configuration[4096];
 static unsigned char direct_probe_control[34];
+static unsigned int direct_stream_interface;
+static unsigned int direct_stream_alternate;
+static unsigned int direct_stream_endpoint;
+static unsigned int direct_stream_packet;
 
 static uint32_t ehci_read(uint32_t address) {
     return *(volatile uint32_t *)address;
@@ -314,6 +318,51 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
                                    live_status, live_command, trace))
             return false;
     }
+    {
+        uint32_t required_payload = (uint32_t)direct_probe_control[22] |
+            ((uint32_t)direct_probe_control[23] << 8) |
+            ((uint32_t)direct_probe_control[24] << 16) |
+            ((uint32_t)direct_probe_control[25] << 24);
+        unsigned int current_interface = 0xffu;
+        unsigned int current_alternate = 0;
+        bool current_streaming = false;
+        direct_stream_packet = 0xffffffffu;
+        for (offset = 0; offset + 2u <= *configuration_length;) {
+            const unsigned char *item = direct_configuration + offset;
+            if (item[0] < 2u || offset + item[0] > *configuration_length)
+                break;
+            if (item[1] == 4 && item[0] >= 9u) {
+                current_interface = item[2];
+                current_alternate = item[3];
+                current_streaming = item[5] == 14 && item[6] == 2;
+            } else if (current_streaming && item[1] == 5 && item[0] >= 7u &&
+                       (item[2] & 0x80u) && (item[3] & 3u) == 1u) {
+                unsigned int raw_packet = (unsigned int)item[4] |
+                                          ((unsigned int)item[5] << 8);
+                unsigned int payload = (raw_packet & 0x7ffu) *
+                                       (1u + ((raw_packet >> 11) & 3u));
+                if (payload >= required_payload &&
+                    payload < direct_stream_packet) {
+                    direct_stream_interface = current_interface;
+                    direct_stream_alternate = current_alternate;
+                    direct_stream_endpoint = item[2];
+                    direct_stream_packet = payload;
+                }
+            }
+            offset += item[0];
+        }
+        if (direct_stream_packet == 0xffffffffu) return false;
+        {
+            unsigned char set_interface[8] =
+                {0x01, 0x0b, (unsigned char)direct_stream_alternate, 0x00,
+                 (unsigned char)direct_stream_interface, 0x00, 0x00, 0x00};
+            *stage = 10;
+            if (!ehci_control_transfer(*active_address, set_interface, 0,
+                                       false, NULL, final_token, live_status,
+                                       live_command, trace))
+                return false;
+        }
+    }
     return true;
 }
 
@@ -452,6 +501,9 @@ static void run_ehci_takeover_probe(void) {
                  ((uint32_t)direct_probe_control[23] << 8) |
                  ((uint32_t)direct_probe_control[24] << 16) |
                  ((uint32_t)direct_probe_control[25] << 24)));
+        printf("UVC active IF:%u alt:%u EP:%02x packet:%u\n",
+               direct_stream_interface, direct_stream_alternate,
+               direct_stream_endpoint, direct_stream_packet);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
                enumeration_stage,
@@ -557,7 +609,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.23\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.24\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
