@@ -86,12 +86,19 @@ static void map_ios58_interfaces(libusb_device *device,
     uint8_t entry_index;
     for (entry_index = 0; entry_index < entry_count; ++entry_index) {
         usb_devdesc descriptor;
+        int32_t fd = -1;
         uint8_t configuration_index;
         if (entries[entry_index].vid != device->vendor_id ||
             entries[entry_index].pid != device->product_id)
             continue;
-        if (USB_GetDescriptors(entries[entry_index].device_id, &descriptor) < 0)
+        if (USB_OpenDevice(entries[entry_index].device_id,
+                           entries[entry_index].vid,
+                           entries[entry_index].pid, &fd) < 0)
             continue;
+        if (USB_GetDescriptors(fd, &descriptor) < 0) {
+            USB_CloseDevice(&fd);
+            continue;
+        }
         for (configuration_index = 0;
              configuration_index < descriptor.bNumConfigurations;
              ++configuration_index) {
@@ -107,6 +114,7 @@ static void map_ios58_interfaces(libusb_device *device,
             }
         }
         USB_FreeDescriptors(&descriptor);
+        USB_CloseDevice(&fd);
     }
 }
 
@@ -145,9 +153,8 @@ static int read_raw_descriptors(int32_t fd, libusb_device *device) {
 
     if (buffer == NULL) return LIBUSB_ERROR_NO_MEM;
     memset(buffer, 0, 32);
-    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
-                             USB_REQ_GETDESCRIPTOR, USB_DT_DEVICE << 8,
-                             0, USB_DT_DEVICE_SIZE, buffer);
+    result = USB_GetGenericDescriptor(fd, USB_DT_DEVICE, 0, 0,
+                                      buffer, USB_DT_DEVICE_SIZE);
     if (result < 0 || buffer[0] < USB_DT_DEVICE_SIZE ||
         buffer[1] != USB_DT_DEVICE) {
         free(buffer);
@@ -156,9 +163,8 @@ static int read_raw_descriptors(int32_t fd, libusb_device *device) {
     memcpy(device->device_descriptor, buffer, USB_DT_DEVICE_SIZE);
 
     memset(buffer, 0, 32);
-    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
-                             USB_REQ_GETDESCRIPTOR, USB_DT_CONFIG << 8,
-                             0, USB_DT_CONFIG_SIZE, buffer);
+    result = USB_GetGenericDescriptor(fd, USB_DT_CONFIG, 0, 0,
+                                      buffer, USB_DT_CONFIG_SIZE);
     if (result < 0 || buffer[0] < USB_DT_CONFIG_SIZE ||
         buffer[1] != USB_DT_CONFIG) {
         free(buffer);
@@ -176,9 +182,8 @@ static int read_raw_descriptors(int32_t fd, libusb_device *device) {
         return LIBUSB_ERROR_NO_MEM;
     }
     memset(buffer, 0, total_length);
-    result = USB_ReadCtrlMsg(fd, USB_CTRLTYPE_DIR_DEVICE2HOST,
-                             USB_REQ_GETDESCRIPTOR, USB_DT_CONFIG << 8,
-                             0, total_length, buffer);
+    result = USB_GetGenericDescriptor(fd, USB_DT_CONFIG, 0, 0,
+                                      buffer, total_length);
     if (result < 0 || buffer[1] != USB_DT_CONFIG) {
         free(buffer);
         free(configuration);
@@ -235,13 +240,16 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
     libusb_device **devices;
     uint8_t count = 0;
     size_t unique_count = 0;
+    unsigned int open_failures = 0;
+    unsigned int descriptor_failures = 0;
+    unsigned int incomplete_uvc = 0;
     int attempt;
     size_t i;
 
     if (context == NULL || list == NULL) return LIBUSB_ERROR_INVALID_PARAM;
     memset(entries, 0, sizeof(entries));
     /* IOS58 populates /dev/usb/ven asynchronously after initialization. */
-    for (attempt = 0; attempt < 10; ++attempt) {
+    for (attempt = 0; attempt < 50; ++attempt) {
         if (USB_GetDeviceList(entries, WII_USB_MAX_DEVICES,
                               WII_USB_VIDEO_CLASS, &count) < 0)
             return LIBUSB_ERROR_IO;
@@ -272,10 +280,21 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
         device->address = (uint8_t)(i + 1);
         device->device_id = entries[i].device_id;
         initialize_interface_ids(device);
-        if (open_device(device, &fd) != LIBUSB_SUCCESS ||
-            read_raw_descriptors(fd, device) != LIBUSB_SUCCESS ||
-            !configuration_is_uvc(device)) {
+        if (open_device(device, &fd) != LIBUSB_SUCCESS) {
+            ++open_failures;
+            free(device);
+            continue;
+        }
+        if (read_raw_descriptors(fd, device) != LIBUSB_SUCCESS) {
+            ++descriptor_failures;
             if (fd >= 0) USB_CloseDevice(&fd);
+            free(device->configuration);
+            free(device);
+            continue;
+        }
+        if (!configuration_is_uvc(device)) {
+            ++incomplete_uvc;
+            USB_CloseDevice(&fd);
             free(device->configuration);
             free(device);
             continue;
@@ -325,8 +344,8 @@ ssize_t libusb_get_device_list(libusb_context *context, libusb_device ***list) {
                  devices[0]->vendor_id, devices[0]->product_id);
     } else {
         snprintf(wii_usb_status, sizeof(wii_usb_status),
-                 "IOS USB: %u entries, none exposed a complete UVC config",
-                 count);
+                 "IOS USB: %u entries; open:%u desc:%u partial:%u",
+                 count, open_failures, descriptor_failures, incomplete_uvc);
     }
     *list = devices;
     return (ssize_t)unique_count;
