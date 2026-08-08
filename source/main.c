@@ -82,11 +82,14 @@ static void ehci_qtd_initialize(ehci_qtd_t *qtd, ehci_qtd_t *next,
         qtd->buffer[0] = ehci_dma_word(ehci_physical(buffer));
 }
 
-static bool ehci_get_device_descriptor(unsigned char descriptor[18],
-                                       uint32_t *final_token,
-                                       uint32_t *live_status,
-                                       uint32_t *live_command,
-                                       uint32_t trace[9]) {
+static bool ehci_control_transfer(unsigned int device_address,
+                                  const unsigned char request[8],
+                                  unsigned int length, bool direction_in,
+                                  unsigned char *result,
+                                  uint32_t *final_token,
+                                  uint32_t *live_status,
+                                  uint32_t *live_command,
+                                  uint32_t trace[9]) {
     /* Hollywood's EHCI can only DMA from its reserved MEM2 aperture. The
      * corresponding physical window is 0x133e0000-0x1345ffff. */
     ehci_qh_t *head = (ehci_qh_t *)0x933e0000u;
@@ -94,6 +97,7 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     ehci_qtd_t *qtd = (ehci_qtd_t *)0x933e00c0u;
     unsigned char *setup = (unsigned char *)0x933e0180u;
     unsigned char *data = (unsigned char *)0x933e01a0u;
+    unsigned int status_index = length > 0 ? 2u : 1u;
     unsigned int elapsed;
     bool completed = false;
 
@@ -101,15 +105,18 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     memset(qh, 0, sizeof(*qh));
     memset(setup, 0, 32);
     memset(data, 0, 32);
-    setup[0] = 0x80;
-    setup[1] = 0x06;
-    setup[3] = 0x01;
-    setup[6] = 18;
+    memcpy(setup, request, 8);
 
     ehci_qtd_initialize(&qtd[0], &qtd[1], 2, 8, false, setup);
-    ehci_qtd_initialize(&qtd[1], &qtd[2], 1, 18, true, data);
-    ehci_qtd_initialize(&qtd[2], NULL, 0, 0, true, NULL);
-    qtd[2].token = ehci_dma_word(0x80000000u | 0x8000u | (3u << 10) | 0x80u);
+    if (length > 0) {
+        ehci_qtd_initialize(&qtd[1], &qtd[2], direction_in ? 1u : 0u,
+                            length, true, data);
+    }
+    ehci_qtd_initialize(&qtd[status_index], NULL,
+                        direction_in ? 0u : 1u, 0, true, NULL);
+    qtd[status_index].token = ehci_dma_word(0x80000000u | 0x8000u |
+                                           (3u << 10) | 0x80u |
+                                           ((direction_in ? 0u : 1u) << 8));
 
     head->horizontal = ehci_dma_word(ehci_physical(qh) | 2u);
     head->endpoint = ehci_dma_word(1u << 15);
@@ -119,7 +126,7 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
 
     qh->horizontal = ehci_dma_word(ehci_physical(head) | 2u);
     qh->endpoint = ehci_dma_word((4u << 28) | (2u << 12) | (1u << 14) |
-                                 (64u << 16));
+                                 (64u << 16) | (device_address & 0x7fu));
     qh->capabilities = ehci_dma_word(1u << 30);
     qh->overlay_next = ehci_dma_word(ehci_physical(&qtd[0]));
     qh->overlay_alternate = ehci_dma_word(1u);
@@ -134,8 +141,8 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     ehci_write(0xcd040010u, 0x00080021u);
 
     for (elapsed = 0; elapsed < 500; ++elapsed) {
-        DCInvalidateRange(&qtd[2], sizeof(qtd[2]));
-        *final_token = __builtin_bswap32(qtd[2].token);
+        DCInvalidateRange(&qtd[status_index], sizeof(qtd[status_index]));
+        *final_token = __builtin_bswap32(qtd[status_index].token);
         if ((*final_token & 0x80u) == 0) {
             completed = (*final_token & 0x7cu) == 0;
             break;
@@ -159,8 +166,39 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     ehci_write(0xcd040010u, 0);
     ehci_wait_bits(0xcd040014u, 0x1000u, 0x1000u, 100);
     DCInvalidateRange(data, 32);
-    if (completed) memcpy(descriptor, data, 18);
+    if (completed && direction_in && result != NULL && length > 0)
+        memcpy(result, data, length);
     return completed;
+}
+
+static bool ehci_enumerate_device(unsigned char descriptor[18],
+                                  unsigned char config_header[9],
+                                  uint32_t *final_token,
+                                  uint32_t *live_status,
+                                  uint32_t *live_command,
+                                  uint32_t trace[9],
+                                  unsigned int *stage) {
+    static const unsigned char get_device[8] =
+        {0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00};
+    static const unsigned char set_address[8] =
+        {0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+    static const unsigned char get_config[8] =
+        {0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 9, 0x00};
+
+    *stage = 1;
+    if (!ehci_control_transfer(0, get_device, 18, true, descriptor,
+                               final_token, live_status, live_command, trace))
+        return false;
+    *stage = 2;
+    if (!ehci_control_transfer(0, set_address, 0, false, NULL,
+                               final_token, live_status, live_command, trace))
+        return false;
+    usleep(5000);
+    *stage = 3;
+    if (!ehci_control_transfer(1, get_config, 9, true, config_header,
+                               final_token, live_status, live_command, trace))
+        return false;
+    return true;
 }
 
 static void print_ehci_probe(void) {
@@ -187,10 +225,12 @@ static void run_ehci_takeover_probe(void) {
     bool reset_done;
     bool port_reset_done;
     unsigned char descriptor[18];
+    unsigned char config_header[9];
     uint32_t transfer_token = 0xffffffffu;
     uint32_t transfer_status = 0xffffffffu;
     uint32_t transfer_command = 0xffffffffu;
     uint32_t trace[9] = {0};
+    unsigned int enumeration_stage = 0;
     bool descriptor_ok;
 
     ehci_write(interrupt_register, 0);
@@ -218,15 +258,21 @@ static void run_ehci_takeover_probe(void) {
     printf("EHCI take halt:%u reset:%u preset:%u port:%08lx\n",
            halted, reset_done, port_reset_done,
            (unsigned long)ehci_read(port_register));
-    descriptor_ok = ehci_get_device_descriptor(descriptor, &transfer_token,
-                                               &transfer_status,
-                                               &transfer_command, trace);
+    descriptor_ok = ehci_enumerate_device(descriptor, config_header,
+                                          &transfer_token, &transfer_status,
+                                          &transfer_command, trace,
+                                          &enumeration_stage);
     if (descriptor_ok) {
         printf("EHCI dev %02x%02x VID:%02x%02x PID:%02x%02x mps:%u\n",
                descriptor[0], descriptor[1], descriptor[9], descriptor[8],
                descriptor[11], descriptor[10], descriptor[7]);
+        printf("EHCI addr:1 cfglen:%u interfaces:%u cfgval:%u\n",
+               (unsigned int)config_header[2] |
+                   ((unsigned int)config_header[3] << 8),
+               config_header[4], config_header[5]);
     } else {
-        printf("EHCI GET_DESC fail tok:%08lx sts:%08lx cmd:%08lx\n",
+        printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
+               enumeration_stage,
                (unsigned long)transfer_token,
                (unsigned long)transfer_status,
                (unsigned long)transfer_command);
@@ -329,7 +375,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.15\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.16\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
