@@ -674,6 +674,9 @@ static void run_ehci_takeover_probe(void) {
         printf("Camera connected: %02x%02x:%02x%02x\n",
                descriptor[9], descriptor[8], descriptor[11], descriptor[10]);
         printf("Capturing 640x480 MJPEG...\n");
+        /* Let exposure and white balance settle; initial C920 frames can be
+         * valid JPEGs containing an entirely black sensor image. */
+        usleep(1500000);
         ehci_receive_frame_test(active_address);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
@@ -699,6 +702,25 @@ static void request_reset_exit(uint32_t irq, void *context) {
     (void)irq;
     (void)context;
     request_exit();
+}
+
+static uint32_t detect_input(void) {
+    uint32_t pressed = 0;
+    uint32_t gc_pressed = 0;
+    if (WPAD_ScanPads() > WPAD_ERR_NONE) {
+        pressed = WPAD_ButtonsDown(0) | WPAD_ButtonsDown(1) |
+                  WPAD_ButtonsDown(2) | WPAD_ButtonsDown(3);
+        if (pressed & WPAD_CLASSIC_BUTTON_HOME) pressed |= WPAD_BUTTON_HOME;
+        if (pressed & WPAD_CLASSIC_BUTTON_B) pressed |= WPAD_BUTTON_B;
+    }
+    if (pressed) return pressed;
+    if (PAD_ScanPads() > PAD_ERR_NONE) {
+        gc_pressed = PAD_ButtonsDown(0) | PAD_ButtonsDown(1) |
+                     PAD_ButtonsDown(2) | PAD_ButtonsDown(3);
+        if (gc_pressed & PAD_BUTTON_MENU) pressed |= WPAD_BUTTON_HOME;
+        if (gc_pressed & PAD_BUTTON_B) pressed |= WPAD_BUTTON_B;
+    }
+    return pressed;
 }
 
 static void fill_black(volatile uint32_t *xfb, const GXRModeObj *mode) {
@@ -742,10 +764,8 @@ static void draw_yuyv(volatile uint32_t *xfb, const GXRModeObj *mode,
 
 static void wait_for_exit_button(void) {
     for (;;) {
-        WPAD_ScanPads();
-        PAD_ScanPads();
-        if ((WPAD_ButtonsDown(0) & (WPAD_BUTTON_HOME | WPAD_BUTTON_B)) ||
-            (PAD_ButtonsDown(0) & PAD_BUTTON_START) || exit_requested) break;
+        if ((detect_input() & (WPAD_BUTTON_HOME | WPAD_BUTTON_B)) ||
+            exit_requested) break;
         VIDEO_WaitVSync();
     }
 }
@@ -780,7 +800,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.32\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.33\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
     run_ehci_takeover_probe();
