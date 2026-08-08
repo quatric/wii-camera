@@ -524,6 +524,7 @@ static void ehci_receive_frame_test(unsigned int device_address) {
     unsigned int first_frame, i, u, packets = 0, errors = 0;
     size_t frame_size = 0;
     bool collecting = false, complete = false;
+    unsigned int frame_id = 0;
 
     for (i = 0; i < 1024; ++i) frame_list[i] = ehci_dma_word(1u);
     memset(itds, 0, sizeof(*itds) * ISO_FRAMES);
@@ -572,13 +573,21 @@ static void ehci_receive_frame_test(unsigned int device_address) {
             ++packets;
             header = packet[0];
             if (header < 2u || header > length || (packet[1] & 0x40u)) continue;
-            if (!collecting && length >= header + 2u &&
-                packet[header] == 0xffu && packet[header + 1] == 0xd8u)
+            if (collecting && (packet[1] & 1u) != frame_id) {
+                collecting = false;
+                frame_size = 0;
+            }
+            if (length >= header + 2u && packet[header] == 0xffu &&
+                packet[header + 1] == 0xd8u) {
                 collecting = true;
+                frame_id = packet[1] & 1u;
+                frame_size = 0;
+            }
             if (collecting && frame_size + length - header <= sizeof(direct_mjpeg_frame)) {
                 memcpy(direct_mjpeg_frame + frame_size, packet + header, length - header);
                 frame_size += length - header;
-                if (packet[1] & 2u) complete = true;
+                if ((packet[1] & 2u) && (packet[1] & 1u) == frame_id)
+                    complete = true;
             }
         }
     }
@@ -800,7 +809,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.33\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.34\n\n");
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
     if (!storage_ready) printf("Storage error: %s\n", error);
     run_ehci_takeover_probe();
