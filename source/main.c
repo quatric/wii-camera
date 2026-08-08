@@ -114,6 +114,8 @@ static bool ehci_control_transfer(unsigned int device_address,
     if (length > 0) {
         ehci_qtd_initialize(&qtd[1], &qtd[2], direction_in ? 1u : 0u,
                             length, true, data);
+        if (direction_in)
+            qtd[1].alternate = ehci_dma_word(ehci_physical(&qtd[2]));
     }
     ehci_qtd_initialize(&qtd[status_index], NULL,
                         direction_in ? 0u : 1u, 0, true, NULL);
@@ -143,7 +145,7 @@ static bool ehci_control_transfer(unsigned int device_address,
     ehci_write(0xcd040028u, ehci_physical(head));
     ehci_write(0xcd040010u, 0x00080021u);
 
-    for (elapsed = 0; elapsed < 500; ++elapsed) {
+    for (elapsed = 0; elapsed < 5000; ++elapsed) {
         DCInvalidateRange(&qtd[status_index], sizeof(qtd[status_index]));
         *final_token = __builtin_bswap32(qtd[status_index].token);
         if ((*final_token & 0x80u) == 0) {
@@ -438,7 +440,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.19\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.20\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
