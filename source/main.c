@@ -52,7 +52,7 @@ typedef struct __attribute__((aligned(32))) {
 } ehci_qh_t;
 
 static uint32_t ehci_dma_word(uint32_t value) {
-    return value;
+    return __builtin_bswap32(value);
 }
 
 static uint32_t ehci_physical(const void *pointer) {
@@ -115,7 +115,7 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
 
     for (elapsed = 0; elapsed < 500; ++elapsed) {
         DCInvalidateRange(&qtd[2], sizeof(qtd[2]));
-        *final_token = qtd[2].token;
+        *final_token = __builtin_bswap32(qtd[2].token);
         if ((*final_token & 0x80u) == 0) {
             completed = (*final_token & 0x7cu) == 0;
             break;
@@ -284,7 +284,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.9\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.10\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
