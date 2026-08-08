@@ -62,10 +62,18 @@ typedef struct __attribute__((aligned(32))) {
     uint32_t overlay_buffer_high[5];
 } ehci_qh_t;
 
+typedef struct __attribute__((aligned(32))) {
+    uint32_t next;
+    uint32_t transaction[8];
+    uint32_t buffer[7];
+    uint32_t buffer_high[7];
+} ehci_itd_t;
+
 _Static_assert(sizeof(ehci_qtd_t) == 64, "EHCI qTD must occupy 64 bytes");
 _Static_assert(offsetof(ehci_qh_t, overlay_next) == 16,
                "EHCI QH overlay must begin at offset 0x10");
 _Static_assert(sizeof(ehci_qh_t) == 96, "EHCI QH must occupy 96 bytes");
+_Static_assert(sizeof(ehci_itd_t) == 96, "EHCI iTD must occupy 96 bytes");
 
 static uint32_t ehci_dma_word(uint32_t value) {
     return __builtin_bswap32(value);
@@ -417,6 +425,71 @@ static void summarize_uvc_configuration(unsigned int length) {
            best_interface, best_alternate, best_endpoint, best_packet);
 }
 
+static void ehci_receive_isochronous_test(unsigned int device_address) {
+    const uint32_t command_register = 0xcd040010u;
+    const uint32_t status_register = 0xcd040014u;
+    const uint32_t frame_index_register = 0xcd040020u;
+    const uint32_t periodic_register = 0xcd040024u;
+    ehci_itd_t *itd = (ehci_itd_t *)0x933e0200u;
+    uint32_t *frame_list = (uint32_t *)0x933e1000u;
+    unsigned char *data = (unsigned char *)0x933e2000u;
+    uint32_t data_physical = ehci_physical(data);
+    unsigned int frame;
+    unsigned int microframe;
+    unsigned int complete = 0;
+    unsigned int errors = 0;
+    unsigned int bytes = 0;
+
+    memset(itd, 0, sizeof(*itd));
+    for (frame = 0; frame < 1024; ++frame)
+        frame_list[frame] = ehci_dma_word(1u);
+    memset(data, 0, direct_stream_packet * 8u);
+    itd->next = ehci_dma_word(1u);
+    for (microframe = 0; microframe < 8; ++microframe) {
+        uint32_t address = data_physical + microframe * direct_stream_packet;
+        unsigned int page = (address - data_physical) >> 12;
+        uint32_t transaction = 0x80000000u |
+            ((uint32_t)direct_stream_packet << 16) | (page << 12) |
+            (address & 0xfffu);
+        if (microframe == 7) transaction |= 0x8000u;
+        itd->transaction[microframe] = ehci_dma_word(transaction);
+    }
+    itd->buffer[0] = ehci_dma_word((data_physical & ~0xfffu) |
+        ((direct_stream_endpoint & 0x0fu) << 8) | (device_address & 0x7fu));
+    itd->buffer[1] = ehci_dma_word(((data_physical + 0x1000u) & ~0xfffu) |
+                                  0x800u | direct_stream_packet);
+    itd->buffer[2] = ehci_dma_word((data_physical + 0x2000u) & ~0xfffu);
+    frame = ((ehci_read(frame_index_register) >> 3) + 2u) & 0x3ffu;
+    frame_list[frame] = ehci_dma_word(ehci_physical(itd));
+
+    DCFlushRange(data, direct_stream_packet * 8u);
+    DCFlushRange(itd, sizeof(*itd));
+    DCFlushRange(frame_list, 4096);
+    ehci_write(periodic_register, ehci_physical(frame_list));
+    ehci_write(command_register, 0x00080011u);
+    for (microframe = 0; microframe < 500; ++microframe) {
+        DCInvalidateRange(itd, sizeof(*itd));
+        if ((__builtin_bswap32(itd->transaction[7]) & 0x80000000u) == 0)
+            break;
+        usleep(1000);
+    }
+    ehci_write(command_register, 0x00080001u);
+    ehci_wait_bits(status_register, 0x4000u, 0, 100);
+    DCInvalidateRange(itd, sizeof(*itd));
+    DCInvalidateRange(data, direct_stream_packet * 8u);
+    for (microframe = 0; microframe < 8; ++microframe) {
+        uint32_t transaction = __builtin_bswap32(itd->transaction[microframe]);
+        if ((transaction & 0x80000000u) == 0) ++complete;
+        if (transaction & 0x70000000u) ++errors;
+        bytes += (transaction >> 16) & 0x0fffu;
+    }
+    printf("ISO frame:%u done:%u err:%u bytes:%u sts:%08lx\n", frame,
+           complete, errors, bytes, (unsigned long)ehci_read(status_register));
+    printf("ISO data:%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+           data[7]);
+}
+
 static void print_ehci_probe(void) {
     uint32_t capability = ehci_read(0xcd040000u);
     uint32_t command = ehci_read(0xcd040010u);
@@ -504,6 +577,7 @@ static void run_ehci_takeover_probe(void) {
         printf("UVC active IF:%u alt:%u EP:%02x packet:%u\n",
                direct_stream_interface, direct_stream_alternate,
                direct_stream_endpoint, direct_stream_packet);
+        ehci_receive_isochronous_test(active_address);
     } else {
         printf("EHCI enum stage:%u fail tok:%08lx sts:%08lx cmd:%08lx\n",
                enumeration_stage,
@@ -609,7 +683,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.24\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.25\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
