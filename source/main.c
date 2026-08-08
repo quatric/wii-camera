@@ -17,6 +17,20 @@
 
 static volatile bool exit_requested;
 
+static uint32_t ehci_read(uint32_t address) {
+    return *(volatile uint32_t *)address;
+}
+
+static void print_ehci_probe(void) {
+    uint32_t capability = ehci_read(0xcd040000u);
+    uint32_t command = ehci_read(0xcd040010u);
+    uint32_t status = ehci_read(0xcd040014u);
+    uint32_t port = ehci_read(0xcd040054u);
+    printf("EHCI raw cap:%08lx cmd:%08lx sts:%08lx port:%08lx\n",
+           (unsigned long)capability, (unsigned long)command,
+           (unsigned long)status, (unsigned long)port);
+}
+
 static void request_exit(void) {
     exit_requested = true;
 }
@@ -106,7 +120,8 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.4\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.5\n\n");
+    print_ehci_probe();
     printf("A: save baseline JPEG   HOME/B: exit\n\n");
 
     storage_ready = storage_init(folder, sizeof(folder), error, sizeof(error));
