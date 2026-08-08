@@ -177,7 +177,8 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
                                   uint32_t *live_status,
                                   uint32_t *live_command,
                                   uint32_t trace[9],
-                                  unsigned int *stage) {
+                                  unsigned int *stage,
+                                  unsigned int *active_address) {
     static const unsigned char get_device[8] =
         {0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00};
     static const unsigned char set_address[8] =
@@ -195,9 +196,16 @@ static bool ehci_enumerate_device(unsigned char descriptor[18],
         return false;
     usleep(5000);
     *stage = 3;
-    if (!ehci_control_transfer(1, get_config, 9, true, config_header,
+    if (ehci_control_transfer(1, get_config, 9, true, config_header,
+                              final_token, live_status, live_command, trace)) {
+        *active_address = 1;
+        return true;
+    }
+    *stage = 4;
+    if (!ehci_control_transfer(0, get_config, 9, true, config_header,
                                final_token, live_status, live_command, trace))
         return false;
+    *active_address = 0;
     return true;
 }
 
@@ -231,6 +239,7 @@ static void run_ehci_takeover_probe(void) {
     uint32_t transfer_command = 0xffffffffu;
     uint32_t trace[9] = {0};
     unsigned int enumeration_stage = 0;
+    unsigned int active_address = 0xffu;
     bool descriptor_ok;
 
     ehci_write(interrupt_register, 0);
@@ -261,12 +270,14 @@ static void run_ehci_takeover_probe(void) {
     descriptor_ok = ehci_enumerate_device(descriptor, config_header,
                                           &transfer_token, &transfer_status,
                                           &transfer_command, trace,
-                                          &enumeration_stage);
+                                          &enumeration_stage,
+                                          &active_address);
     if (descriptor_ok) {
         printf("EHCI dev %02x%02x VID:%02x%02x PID:%02x%02x mps:%u\n",
                descriptor[0], descriptor[1], descriptor[9], descriptor[8],
                descriptor[11], descriptor[10], descriptor[7]);
-        printf("EHCI addr:1 cfglen:%u interfaces:%u cfgval:%u\n",
+        printf("EHCI addr:%u cfglen:%u interfaces:%u cfgval:%u\n",
+               active_address,
                (unsigned int)config_header[2] |
                    ((unsigned int)config_header[3] << 8),
                config_header[4], config_header[5]);
@@ -375,7 +386,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.16\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.17\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
