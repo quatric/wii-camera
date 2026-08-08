@@ -2,7 +2,7 @@
 <app version="1">
   <name>WiiCam</name>
   <coder>quatric</coder>
-  <version>0.2.8-wip</version>
+  <version>0.2.9-wip</version>
   <release_date>20260808000000</release_date>
   <short_description>UVC camera for Wii</short_description>
   <long_description>Shows a live USB UVC camera preview and saves baseline JPEG photos to sd:/wiicam or usb:/wiicam. A takes a photo. HOME or B exits.</long_description>

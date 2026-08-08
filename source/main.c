@@ -5,7 +5,6 @@
 #include <fat.h>
 #include <gccore.h>
 #include <ogc/system.h>
-#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,17 +76,15 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
                                        uint32_t *final_token,
                                        uint32_t *live_status,
                                        uint32_t *live_command) {
-    ehci_qh_t *qh = memalign(32, 64);
-    ehci_qtd_t *qtd = memalign(32, sizeof(ehci_qtd_t) * 3);
-    unsigned char *setup = memalign(32, 32);
-    unsigned char *data = memalign(32, 32);
+    /* Hollywood's EHCI can only DMA from its reserved MEM2 aperture. The
+     * corresponding physical window is 0x133e0000-0x1345ffff. */
+    ehci_qh_t *qh = (ehci_qh_t *)0x933e0000u;
+    ehci_qtd_t *qtd = (ehci_qtd_t *)0x933e0040u;
+    unsigned char *setup = (unsigned char *)0x933e00a0u;
+    unsigned char *data = (unsigned char *)0x933e00c0u;
     unsigned int elapsed;
     bool completed = false;
 
-    if (qh == NULL || qtd == NULL || setup == NULL || data == NULL) {
-        free(qh); free(qtd); free(setup); free(data);
-        return false;
-    }
     memset(qh, 0, 64);
     memset(setup, 0, 32);
     memset(data, 0, 32);
@@ -131,7 +128,6 @@ static bool ehci_get_device_descriptor(unsigned char descriptor[18],
     ehci_wait_bits(0xcd040014u, 0x1000u, 0x1000u, 100);
     DCInvalidateRange(data, 32);
     if (completed) memcpy(descriptor, data, 18);
-    free(qh); free(qtd); free(setup); free(data);
     return completed;
 }
 
@@ -288,7 +284,7 @@ int main(void) {
 
     console_init((void *)framebuffers[front], 20, 20, mode->fbWidth,
                  mode->xfbHeight, mode->fbWidth * VI_DISPLAY_PIX_SZ);
-    printf("\x1b[2;0HWiiCam WIP 0.2.8\n\n");
+    printf("\x1b[2;0HWiiCam WIP 0.2.9\n\n");
     print_ehci_probe();
     run_ehci_takeover_probe();
     printf("Direct EHCI takeover test complete. HOME/B exits.\n");
