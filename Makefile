@@ -48,7 +48,7 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                   -I$(CURDIR)/$(BUILD)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib) -L$(LIBOGC_LIB)
 
-.PHONY: all clean run package
+.PHONY: all $(BUILD) clean run package
 
 all: $(BUILD)
 
