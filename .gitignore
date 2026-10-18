@@ -4,3 +4,4 @@ vendor/libuvc/
 *.dol
 *.elf
 *.map
+.dolxz/

@@ -19,6 +19,13 @@ CFLAGS      := -g -O2 -Wall -Wextra -ffunction-sections -D__wii__ \
 CXXFLAGS    := $(CFLAGS)
 LDFLAGS     := -g $(MACHDEP) -Wl,-Map,$(notdir $@).map,--gc-sections
 
+# The .dol that goes into the Homebrew Channel package.
+ifeq ($(NO_DOLXZ),1)
+BOOT_DOL	=	$(TARGET).dol
+else
+BOOT_DOL	=	$(TARGET)-xz.dol
+endif
+
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
 export VPATH  := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
@@ -50,18 +57,29 @@ $(BUILD):
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 clean:
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).dol
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).dol $(TARGET)-xz.dol
 
 run: all
 	wiiload $(TARGET).dol
 
 package: all
 	@mkdir -p dist/apps/wiicam
-	@cp $(TARGET).dol meta.xml dist/apps/wiicam/
+	@cp $(BOOT_DOL) dist/apps/wiicam/boot.dol
+	@cp meta.xml dist/apps/wiicam/
 
 else
 
 DEPENDS := $(OFILES:.o=.d)
+
+#---------------------------------------------------------------------------------
+# Self-extracting xz-compressed copy of the .dol (FIX94's dolxz, see
+# scripts/dolxz.sh). It is the default target; NO_DOLXZ=1 skips it.
+#---------------------------------------------------------------------------------
+ifneq ($(NO_DOLXZ),1)
+$(OUTPUT)-xz.dol: $(OUTPUT).dol
+	@echo compressing ... $(notdir $@)
+	@sh $(dir $(OUTPUT))scripts/dolxz.sh $< $@
+endif
 
 $(OUTPUT).dol: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
