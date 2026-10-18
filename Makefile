@@ -6,13 +6,13 @@ include $(DEVKITPPC)/wii_rules
 
 TARGET      := wiicam
 BUILD       := build
-SOURCES     := source port/libusb-wii vendor/libuvc-wii/src
+SOURCES     := source libinput-wii/source port/libusb-wii vendor/libuvc-wii/src
 DATA        := data
 INCLUDES    := include port/libusb-wii/include vendor/libuvc-wii/include
 
 # libuvc and the Wii libusb compatibility backend are built in-tree.
-LIBS        := -ljpeg -lfat -lwiiuse -lbte -logc -lm
-LIBDIRS     := $(PORTLIBS)
+LIBS        := -ljpeg -lfat -lwiikeyboard -lwiiuse -lbte -logc -lm
+LIBDIRS     := $(PORTLIBS) $(CURDIR)/libinput-wii
 
 CFLAGS      := -g -O2 -Wall -Wextra -ffunction-sections -D__wii__ \
                $(MACHDEP) $(INCLUDE)
@@ -26,7 +26,8 @@ export VPATH  := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 export DEPSDIR := $(CURDIR)/$(BUILD)
 
 CFILES   := camera.c jpeg_save.c main.c storage.c libusb_wii.c \
-            ctrl.c ctrl-gen.c device.c diag.c frame.c init.c misc.c stream.c
+            ctrl.c ctrl-gen.c device.c diag.c frame.c init.c misc.c stream.c \
+            $(notdir $(wildcard libinput-wii/source/*.c))
 CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 SFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 BINFILES := $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <wiiuse/wpad.h>
+#include <input_wii.h>
 
 #define CAPTURE_WIDTH  640
 #define CAPTURE_HEIGHT 480
@@ -722,22 +723,8 @@ static void request_reset_exit(uint32_t irq, void *context) {
 }
 
 static uint32_t detect_input(void) {
-    uint32_t pressed = 0;
-    uint32_t gc_pressed = 0;
-    if (WPAD_ScanPads() > WPAD_ERR_NONE) {
-        pressed = WPAD_ButtonsDown(0) | WPAD_ButtonsDown(1) |
-                  WPAD_ButtonsDown(2) | WPAD_ButtonsDown(3);
-        if (pressed & WPAD_CLASSIC_BUTTON_HOME) pressed |= WPAD_BUTTON_HOME;
-        if (pressed & WPAD_CLASSIC_BUTTON_B) pressed |= WPAD_BUTTON_B;
-    }
-    if (pressed) return pressed;
-    if (PAD_ScanPads() > PAD_ERR_NONE) {
-        gc_pressed = PAD_ButtonsDown(0) | PAD_ButtonsDown(1) |
-                     PAD_ButtonsDown(2) | PAD_ButtonsDown(3);
-        if (gc_pressed & PAD_BUTTON_MENU) pressed |= WPAD_BUTTON_HOME;
-        if (gc_pressed & PAD_BUTTON_B) pressed |= WPAD_BUTTON_B;
-    }
-    return pressed;
+    INPUT_Update();
+    return INPUT_ButtonsDown();
 }
 
 static void fill_black(volatile uint32_t *xfb, const GXRModeObj *mode) {
@@ -799,8 +786,8 @@ int main(void) {
     bool storage_ready;
 
     VIDEO_Init();
-    WPAD_Init();
-    PAD_Init();
+    /* Controllers and keyboard via libinput-wii; no IR pointer or mouse. */
+    INPUT_InitEx(INPUT_INIT_NO_POINTER | INPUT_INIT_NO_MOUSE);
     SYS_SetPowerCallback(request_exit);
     SYS_SetResetCallback(request_reset_exit);
 
@@ -865,17 +852,12 @@ int main(void) {
 
     while (!exit_requested) {
         camera_frame_t frame;
-        uint32_t wpad_down;
-        uint16_t pad_down;
+        uint32_t down;
         bool capture;
 
-        WPAD_ScanPads();
-        PAD_ScanPads();
-        wpad_down = WPAD_ButtonsDown(0);
-        pad_down = PAD_ButtonsDown(0);
-        if ((wpad_down & (WPAD_BUTTON_HOME | WPAD_BUTTON_B)) ||
-            (pad_down & PAD_BUTTON_START)) break;
-        capture = (wpad_down & WPAD_BUTTON_A) || (pad_down & PAD_BUTTON_A);
+        down = detect_input();
+        if (down & (WPAD_BUTTON_HOME | WPAD_BUTTON_B)) break;
+        capture = (down & WPAD_BUTTON_A) != 0;
 
         if (camera_lock_latest(camera, &frame)) {
             unsigned int back = front ^ 1u;
@@ -903,6 +885,7 @@ cleanup:
     camera_destroy(camera);
     fatUnmount("sd:");
     fatUnmount("usb:");
+    INPUT_Shutdown();
     VIDEO_SetBlack(true);
     VIDEO_Flush();
     VIDEO_WaitVSync();
