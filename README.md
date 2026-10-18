@@ -48,6 +48,10 @@ export DEVKITPPC="$DEVKITPRO/devkitPPC"
 make package
 ```
 
+`make package` uses `wiicam-xz.dol`, the same program packed into a self-extracting
+`.dol` a fraction of the size, as `boot.dol`. The first build downloads and builds [dolxz](https://github.com/FIX94/dolxz), which needs a host C compiler and liblzma (Debian/Ubuntu: `apt-get install liblzma-dev pkg-config`; macOS: `brew install xz`). `make NO_DOLXZ=1` packages the plain
+`wiicam.dol` instead.
+
 Copy `dist/apps/wiicam` to `apps/wiicam` on the SD card. The `<ahb_access/>` and
 `<no_ios_reload/>` entries are intentional: the USB backend needs IOS58 USB
 access when launched from the Homebrew Channel.
